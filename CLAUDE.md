@@ -1,15 +1,17 @@
-# WeaponSpawner — RoboCop: Rogue City mod
+# RoboCop Cheats (`RoboCopCheats`) — RoboCop: Rogue City mod
 
-Goal: an in-game way (clickable menu + hotkeys/console) to spawn any weapon **with working ammo**, replacing the old Cheat Engine + console-command workflow.
+Renamed from WeaponSpawner on 2026-11-13 (it grew past weapons). Console commands `wsdump`/`wschip*` became `rcdump`/`rcchip*`; the Lua/C++ bridge globals `WS_UI_*` became `RC_UI_*`.
+
+Goal: an in-game way (clickable menu + hotkeys/console) to spawn weapons **with working ammo**, Auto-9 chips and upgrade boards, replacing the old Cheat Engine + console-command workflow.
 
 ## Layout
 - `Win64/` — exact mirror of what gets copied into the game's `Game\Binaries\Win64\` folder.
   - `dwmapi.dll` + `ue4ss/` = RE-UE4SS **v4.0.0** (stable, released 2026-11-12). Official binaries, not rebuilt.
-  - `ue4ss/Mods/WeaponSpawner/Scripts/main.lua` — **our Lua mod**: all game interaction (give weapon/ammo), hotkeys, console commands.
-  - `ue4ss/Mods/WeaponSpawner/dlls/main.dll` — **our C++ mod** (build output of `cpp/`): only draws the "Weapon Spawner" GUI tab.
-  - `ue4ss/Mods/mods.txt` — `WeaponSpawner : 1` added above the `Keybinds` line (Keybinds must stay last).
+  - `ue4ss/Mods/RoboCopCheats/Scripts/main.lua` — **our Lua mod**: all game interaction (give weapon/ammo), hotkeys, console commands.
+  - `ue4ss/Mods/RoboCopCheats/dlls/main.dll` — **our C++ mod** (build output of `cpp/`): only draws the "RoboCop Cheats" GUI tab.
+  - `ue4ss/Mods/mods.txt` — `RoboCopCheats : 1` added above the `Keybinds` line (Keybinds must stay last).
   - `ue4ss/UE4SS-settings.ini` — changes: `ConsoleEnabled = 1` (external log window), `EnableHotReloadSystem = 1` (Ctrl+R reloads all mods, same as the GUI's "Restart All Mods"), `GuiConsoleEnabled = 1` + `GuiConsoleVisible = 1` (GUI window with our tab; Ctrl+O toggles). Console can go back to 0 when done debugging; the GUI ones must stay 1 for the menu.
-- `cpp/` — C++ mod source. `cpp/CMakeLists.txt` pulls in `_deps/RE-UE4SS`; `cpp/WeaponSpawner/dllmain.cpp` is the tab. Post-build copies the DLL to `Win64/ue4ss/Mods/WeaponSpawner/dlls/main.dll`.
+- `cpp/` — C++ mod source. `cpp/CMakeLists.txt` pulls in `_deps/RE-UE4SS`; `cpp/RoboCopCheats/dllmain.cpp` is the tab. Post-build copies the DLL to `Win64/ue4ss/Mods/RoboCopCheats/dlls/main.dll`.
 - `_deps/RE-UE4SS/` (gitignored) — UE4SS source at tag **v4.0.0** with submodules (UEPseudo is private; user's GitHub has access). Submodules use SSH URLs; fetch with `git -c url."https://github.com/".insteadOf="git@github.com:" submodule update --init --recursive --depth 1`.
 - `_downloads/` — original UE4SS zip + zCustomGameConfigs (no RoboCop entry exists; defaults work). Reference only.
 - `README.txt` — user-facing install/usage.
@@ -17,11 +19,11 @@ Goal: an in-game way (clickable menu + hotkeys/console) to spawn any weapon **wi
 ## Building the C++ mod
 - Toolchain: VS 2026 Community (MSVC 14.51), its bundled CMake + Ninja, Rust stable (needed by patternsleuth).
 - From a VS x64 dev environment (`vcvars64.bat`) in `cpp/`:
-  `cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Game__Shipping__Win64` then `cmake --build build --target WeaponSpawner`.
+  `cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Game__Shipping__Win64` then `cmake --build build --target RoboCopCheats`.
 - ABI check: every UE4SS.dll import of `main.dll` must exist in the **official** `Win64/ue4ss/UE4SS.dll` exports (`dumpbin /imports` vs `/exports`). Verified 2026-11-13: 26/26 present.
 - The game locks `main.dll` while running, so C++ changes need a game restart. Lua changes: Ctrl+R / Restart All Mods.
 - **ImGui rule:** the DLL has its own ImGui copy. Every tab callback must call `bind_ue4ss_imgui()` first. UE4SS only fires `on_ui_init` at initial startup, never after a reload, so `UE4SS_ENABLE_IMGUI()` alone leaves a reloaded DLL with a null context.
-- Crash triage: UE4SS writes `ue4ss/crash_*.dmp`. With no WinDbg installed, parse it with the `minidump` pip package, then symbolize `main.dll+offset` via dbghelp `SymFromAddr`/`SymGetLineFromAddr` against `cpp/build/WeaponSpawner/WeaponSpawner.pdb`.
+- Crash triage: UE4SS writes `ue4ss/crash_*.dmp`. With no WinDbg installed, parse it with the `minidump` pip package, then symbolize `main.dll+offset` via dbghelp `SymFromAddr`/`SymGetLineFromAddr` against `cpp/build/RoboCopCheats/RoboCopCheats.pdb`.
 
 ## Game facts
 - Install: `C:\Program Files (x86)\Steam\steamapps\common\Robocop Rogue City`
@@ -46,8 +48,8 @@ Goal: an in-game way (clickable menu + hotkeys/console) to spawn any weapon **wi
 
 ## How it works
 - Lua: give = load class (`StaticFindObject`, else `LoadAsset("/Game/.../WP_X.WP_X_C")`) → `SpawnActor` at player → `Backpack:AddWeaponToBackpack(actor, true, …)`. Ammo = `AddItemsOfClassToBackpack`. Game-thread work via `ExecuteInGameThread` / `LoopInGameThreadWithDelay`.
-- Hotkeys: F7/F8 cycle selection, F9 give, F6 dump Backpack API. Console: `givelist`, `give <index|name>`, `giveammo <B_AmmoX> [amount]` (`give B_AmmoX` also works), `wsdump`.
-- GUI bridge: C++ `on_lua_start` (same-named Lua mod) registers globals `WS_UI_Clear/AddWeapon/AddAmmo/Pop/Status` into the Lua state. Lua polls `WS_UI_Pop()` every 100 ms on the game thread; requests are `"give <asset>"` / `"ammo <asset> <n>"`. Shared state behind a mutex (GUI thread vs game thread). Weapon/ammo lists live only in main.lua and are pushed to the tab.
+- Hotkeys: F7/F8 cycle selection, F9 give, F6 dump Backpack API + chip info. Console: `givelist`, `give <index|name>`, `giveammo <B_AmmoX> [amount]` (`give B_AmmoX` also works), `rcdump`, `givechip <URDL> [percent] [look]`, `givechipraw <Shape> <rot> [boost] [tier]`, `boardlist`, `giveboard <index|row>`, `rcchipdump`.
+- GUI bridge: C++ `on_lua_start` (same-named Lua mod) registers globals `RC_UI_Clear/AddWeapon/AddAmmo/AddBoard/Pop/Status` into the Lua state. Lua polls `RC_UI_Pop()` every 100 ms on the game thread; requests are `"give <asset>"` / `"ammo <asset> <n>"` / `"chip <armsmask> <percent> <look 1-4>"` / `"board <row>"`. The tab has two pages: "Weapons & Ammo" and "Chips & Boards". Shared state behind a mutex (GUI thread vs game thread). Weapon/ammo lists live only in main.lua and are pushed to the tab.
 
 ## Status
 - [x] UE4SS staged and running in game; Lua mod works.
@@ -63,11 +65,18 @@ Goal: an in-game way (clickable menu + hotkeys/console) to spawn any weapon **wi
 - [x] Also removed (2026-11-13): `WP_BerettaAuto9` (RoboCop's built-in gun, pointless) and `WP_Pistol` (spawns broken).
 - [x] **Every weapon in WEAPONS verified in game** (2026-11-13): all 17 spawn and arrive loaded with ammo (SIG Sauer, Desert Eagle, Uzi, TEC-9, Sterling Mk6, AKM, Steyr AUG, HK G11, HK21, M60, Mossberg, OCP Combat Shotgun, SPAS-12, Barrett M82, Cobra Assault Cannon, MM-1, ATGM). dx11 GUI: no NVIDIA errors since the switch.
 - [ ] User's current save already can't pick up the M60 (believed to be old 2023 Cheat Engine damage) — test on a fresh save.
-- [x] Ammo list trimmed to the 10 types kept weapons use (2026-11-13), mapping read from each weapon's `AmmoItem`. Removed weapons mostly had no valid `AmmoItem` at all. Ammo buttons show weapon-based names (`WS_UI_AddAmmo(display, asset)`; DLL rebuilt, Lua + DLL must be deployed together).
+- [x] Ammo list trimmed to the 10 types kept weapons use (2026-11-13), mapping read from each weapon's `AmmoItem`. Removed weapons mostly had no valid `AmmoItem` at all. Ammo buttons show weapon-based names (`RC_UI_AddAmmo(display, asset)`; DLL rebuilt, Lua + DLL must be deployed together).
 - [x] Ammo giving via `AddItemsOfClassToBackpack` verified in game (2026-11-13 17:47): every type incl. Rifle, LMG and Auto-9 reported added; user confirmed it works. This fixes the 2023 `Add B_AmmoRifle/LMG` failure.
 - [ ] `AmmoAdded` out-param detection (`HasAnyPropertyFlags`) doesn't trigger; harmless, value just isn't logged.
 - [x] Removed `WP_BaseballBat` (2026-11-13): spawns but can't be used.
-- [ ] Later ideas: precise chip spawner via `AddPredefinedChip`; melee via `Backpack:SetMeleeWeapon` with the DLC1 `WP_MeleeWeapon_BaseballBat_Child` / `WP_MeleeWeapon_Hammer` (signature unknown; dump it first).
+- [ ] **Chips & boards** (2026-11-13). Chips: menu = arms "+", Value %, Look; mapping and formula confirmed from the game's own chip widgets (`rcchipmap`), DLL with the new menu built but not yet tested in game. Boards: untested.
+  - Chips are `B_OCP_Chip`/`B_ChipItem` items (ChipItem: `ConnectionType`, `Boost`, `RotationOffset`, `ChipTier`) in `Backpack.ChipsSlots`. Chips have **no stat**: the board node they sit on decides it.
+  - `EChipConnectionType` Omni=0, TShape=1, LShape=2, PassThrough=3, DeadEnd=4. Sides 0=Left 1=Up 2=Right 3=Down; each `RotationOffset` step = quarter turn clockwise. At rotation 0: DeadEnd=L, LShape=L+D, PassThrough=L+R, TShape=L+R+D. Verified against all 15 combinations seen in game.
+  - Shown % = `Boost * 1.5` rounded half up (25->38%, 30->45%). Game drops top out at 45% (boost 30); the user's 300% chips came from Cheat Engine.
+  - **`ChipTier` must be 0..3**: the widget has 4 tier textures (`T_Chip01..04`). Tier 10 crashed the game when the inventory opened (UE crash 18:06, AV reading 0x38). Lua clamps it. Tier 0 = normal look, tier 1 = hollow ring; tier doesn't change the %. Shown to the user as "Look" 1-4.
+  - Boards: `/Script/Game.GlobalFunctionLibrary:AddWeaponUpgradeBoardToPlayer(Object WorldContextObject, DataTableRowHandle BoardHandle)`, static. Rows of `DT_WeaponUpgradeBoards`: Tier2_Tutorial, Tier3_1..3, Tier4_1..3, Tier5_1..3, Tier6, Tier6_1..3.
+  - Research commands kept: `rcchipdump`, `rcchipinfo` (large), `rcchipmap` (Ctrl+F6, upgrade screen open).
+- [ ] Later ideas: melee via `Backpack:SetMeleeWeapon` with the DLC1 `WP_MeleeWeapon_BaseballBat_Child` / `WP_MeleeWeapon_Hammer` (signature unknown; dump it first).
 
 ## Working rules
 - Edit files here (`Win64/`, `cpp/`), then copy to the game folder to test (game folder is under Program Files).

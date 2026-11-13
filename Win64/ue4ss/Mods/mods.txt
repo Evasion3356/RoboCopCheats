@@ -8,7 +8,7 @@ BPModLoaderMod : 1
 
 
 
-WeaponSpawner : 1
+RoboCopCheats : 1
 
 ; Built-in keybinds, do not move up!
 Keybinds : 1
