@@ -11,6 +11,8 @@
 //   RC_UI_Pop() -> string|nil           next queued request: "give <asset>" / "ammo <asset> <amount>" /
 //                                       "chip <arms mask> <percent> <look 1-4>" / "board <row>"
 //   RC_UI_Status(msg)                   status line shown at the top of the tab
+//   RC_UI_SetDlcWeapon(asset)           current DLC starting weapon ("default" = game's own)
+//                                       (combo sends "dlcweapon <asset|default>")
 // The GUI runs on UE4SS's render thread and Lua polls on the game thread, so all shared
 // state is behind one mutex.
 
@@ -45,6 +47,7 @@ namespace
     std::vector<WeaponEntry> g_ammo;   // same shape: display label + asset name
     std::vector<WeaponEntry> g_boards; // display label + DataTable row name
     std::deque<std::string> g_requests;
+    std::string g_dlc_weapon = "default"; // asset name, or "default"
     std::string g_status = "Waiting for the RoboCopCheats Lua script to start...";
     bool g_lua_connected = false;
 
@@ -121,6 +124,15 @@ namespace
         return 1;
     }
 
+    int rc_lua_set_dlc_weapon(const LuaMadeSimple::Lua& lua)
+    {
+        if (!lua.is_string()) return 0;
+        std::string asset{lua.get_string()};
+        std::lock_guard lock{g_mutex};
+        g_dlc_weapon = std::move(asset);
+        return 0;
+    }
+
     int rc_lua_status(const LuaMadeSimple::Lua& lua)
     {
         if (!lua.is_string()) return 0;
@@ -168,10 +180,44 @@ namespace
         return true;
     }
 
-    void draw_weapons_page(const std::vector<WeaponEntry>& weapons, const std::vector<WeaponEntry>& ammo)
+    // Weapon the Deluxe/DLC edition hands out at level start (OCP Combat Shotgun by default).
+    // The OCP Combat Shotgun itself is left out of the list: "Game default" is that weapon.
+    constexpr const char* DlcDefaultAsset = "WP_MossbergBullpup";
+
+    void draw_dlc_weapon_picker(const std::vector<WeaponEntry>& weapons, const std::string& current)
+    {
+        std::string preview = "Game default (OCP Combat Shotgun)";
+        for (const auto& w : weapons)
+        {
+            if (w.asset == current) preview = w.display;
+        }
+        ImGui::SetNextItemWidth(260.0f);
+        if (ImGui::BeginCombo("DLC starting weapon", preview.c_str()))
+        {
+            if (ImGui::Selectable("Game default (OCP Combat Shotgun)", current == "default")) push_request("dlcweapon default");
+            for (const auto& w : weapons)
+            {
+                if (w.asset == DlcDefaultAsset) continue;
+                ImGui::PushID(w.asset.c_str());
+                if (ImGui::Selectable(w.display.c_str(), w.asset == current)) push_request("dlcweapon " + w.asset);
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("With the Deluxe edition, levels start you with the OCP Combat Shotgun.\n"
+                              "Pick another weapon to get that instead. Saved; applies from the next level start.");
+        }
+    }
+
+    void draw_weapons_page(const std::vector<WeaponEntry>& weapons, const std::vector<WeaponEntry>& ammo, const std::string& dlc_weapon)
     {
         static char filter[64]{};
         static int ammo_amount = 200;
+
+        draw_dlc_weapon_picker(weapons, dlc_weapon);
+        ImGui::Separator();
 
         ImGui::SetNextItemWidth(220.0f);
         ImGui::InputTextWithHint("##filter", "Filter weapons / ammo...", filter, sizeof(filter));
@@ -385,6 +431,7 @@ namespace
         std::vector<WeaponEntry> ammo;
         std::vector<WeaponEntry> boards;
         std::string status;
+        std::string dlc_weapon;
         bool connected;
         {
             std::lock_guard lock{g_mutex};
@@ -392,6 +439,7 @@ namespace
             ammo = g_ammo;
             boards = g_boards;
             status = g_status;
+            dlc_weapon = g_dlc_weapon;
             connected = g_lua_connected;
         }
 
@@ -406,7 +454,7 @@ namespace
         if (!ImGui::BeginTabBar("rc_pages")) return;
         if (ImGui::BeginTabItem("Weapons & Ammo"))
         {
-            draw_weapons_page(weapons, ammo);
+            draw_weapons_page(weapons, ammo, dlc_weapon);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Chips & Boards"))
@@ -425,7 +473,7 @@ class RoboCopCheatsMod : public CppUserModBase
     {
         ModName = STR("RoboCopCheats");
         ModVersion = STR("1.0");
-        ModDescription = STR("Cheats tab for RoboCop: Rogue City: weapons, ammo, Auto-9 chips, upgrade boards");
+        ModDescription = STR("Cheats tab for RoboCop: Rogue City: weapons, ammo, DLC starting weapon, Auto-9 chips, upgrade boards");
         ModAuthors = STR("Evasion3356");
 
         register_tab(STR("RoboCop Cheats"), [](CppUserModBase*) { draw_cheats_tab(); });
@@ -448,6 +496,7 @@ class RoboCopCheatsMod : public CppUserModBase
         lua.register_function("RC_UI_AddBoard", &rc_lua_add_board);
         lua.register_function("RC_UI_Pop", &rc_lua_pop);
         lua.register_function("RC_UI_Status", &rc_lua_status);
+        lua.register_function("RC_UI_SetDlcWeapon", &rc_lua_set_dlc_weapon);
         Output::send<LogLevel::Verbose>(STR("[RoboCopCheats] GUI bridge registered\n"));
     }
 

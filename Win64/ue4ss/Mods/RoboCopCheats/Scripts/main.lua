@@ -17,6 +17,8 @@
       givechipraw <Shape> <rot> <boost> <tier>   raw AddPredefinedChip (tier 0-3)
       boardlist                    list weapon upgrade boards (DT_WeaponUpgradeBoards rows)
       giveboard <index|row>        give an upgrade board
+      dlcweapon <index|name|default>  weapon the Deluxe/DLC edition starts levels with
+                                   (instead of the OCP Combat Shotgun); saved to dlc_weapon.txt
       rcchipdump                   chip enum, board functions and board rows to the log
       rcchipmap   (Ctrl+F6)        research: each chip's shape/rotation vs. what its widget shows
       rcchipinfo                   research: full chip/backpack/widget property dump (large)
@@ -134,7 +136,7 @@ end
 -- After a death/checkpoint reload the old game state's Backpack can still be in memory
 -- while it is being torn down; adding a weapon to that one can crash the game, so we
 -- never fall back to "any Backpack" when more than one exists.
-local function GetBackpack()
+local function GetBackpack(quiet)
     local gs = nil
     pcall(function() gs = UEHelpers.GetWorld().GameState end)
 
@@ -153,6 +155,7 @@ local function GetBackpack()
     end
 
     if #live == 1 and not valid(gs) then return live[1] end
+    if quiet then return nil end
     Log(string.format("No Backpack on the current GameState (%s); %d Backpack object(s) in memory:",
         valid(gs) and gs:GetFullName() or "GameState not found", #live))
     for _, bp in ipairs(live) do Log("    " .. bp:GetFullName()) end
@@ -323,6 +326,120 @@ local function GiveAmmo(assetName, amount)
     end
     local ok, why = TryCall(bp, "AddItemsOfClassToBackpack", { class = cls, amount = amount })
     Notify(ok and ("Added " .. amount .. " " .. label) or ("Ammo failed: " .. why))
+end
+
+----------------------------------------------------------------------------
+-- Deluxe/DLC starting weapon. On levels whose LevelData has bShouldAddDLCWeapon, the game
+-- gives the player the class in Backpack.DeluxeEditionPlayerWeapon (OCP Combat Shotgun by
+-- default) at a fresh level start (not on save loads or checkpoint restarts, which restore
+-- the saved inventory). We put the chosen class into that property on the live Backpack as
+-- soon as it is created, so the game's own code hands out our weapon.
+-- What did NOT work (2026-11-13): a hook on Backpack:TryToAddDlcWeaponToBackpack never
+-- fires (the game calls it natively), and writing the property on the Default__Backpack
+-- CDO corrupted it (read back as an InteractiveComponent) without affecting new Backpacks.
+-- The choice is saved to dlc_weapon.txt next to the Scripts folder.
+----------------------------------------------------------------------------
+local DLC_PROP = "DeluxeEditionPlayerWeapon"
+local DLC_DEFAULT_ASSET = "WP_MossbergBullpup"
+
+local dlcWeapon = nil      -- asset name of the replacement, nil = game default
+
+-- Mods\RoboCopCheats, from this script's own path (UE4SS loads it by full path). Falls back
+-- to the path relative to the game's Win64 folder, UE4SS's working directory.
+local function ModDir()
+    local ok, src = pcall(function() return debug.getinfo(1, "S").source end)
+    if ok and type(src) == "string" then
+        local dir = src:gsub("^@", ""):match("^(.*)[\\/]Scripts[\\/][^\\/]*$")
+        if dir then return dir end
+    end
+    return "ue4ss\\Mods\\RoboCopCheats"
+end
+local DLC_SETTINGS_FILE = ModDir() .. "\\dlc_weapon.txt"
+
+local function FindWeaponByAsset(asset)
+    if not asset then return nil end
+    for _, w in ipairs(WEAPONS) do if w[2]:lower() == asset:lower() then return w end end
+    return nil
+end
+
+local function DlcWeaponName()
+    local w = FindWeaponByAsset(dlcWeapon)
+    return w and w[1] or "game default (OCP Combat Shotgun)"
+end
+
+local function LoadDlcSetting()
+    local f = io.open(DLC_SETTINGS_FILE, "r")
+    if not f then return end
+    local s = (f:read("l") or ""):match("^%s*(%S*)")
+    f:close()
+    local w = FindWeaponByAsset(s)
+    dlcWeapon = (w and w[2] ~= DLC_DEFAULT_ASSET) and w[2] or nil
+    Log("DLC starting weapon (from " .. DLC_SETTINGS_FILE .. "): " .. DlcWeaponName())
+end
+
+local function SaveDlcSetting()
+    local f, err = io.open(DLC_SETTINGS_FILE, "w")
+    if not f then Log("Could not save " .. DLC_SETTINGS_FILE .. ": " .. tostring(err)) return false end
+    f:write((dlcWeapon or "default") .. "\n")
+    f:close()
+    return true
+end
+
+-- Puts the chosen class into bp.DeluxeEditionPlayerWeapon. "Default" loads the OCP Combat
+-- Shotgun class explicitly instead of remembering the old value, because after a mod
+-- reload the live Backpack may already hold our replacement.
+local function ApplyDlcWeapon(bp)
+    if not valid(bp) then return end
+    local ok, cur = pcall(function() return bp[DLC_PROP] end)
+    if not ok then Log("Backpack has no " .. DLC_PROP .. ": " .. tostring(cur)) return end
+    local want = LoadClass(WEAPON_DIR, dlcWeapon or DLC_DEFAULT_ASSET)
+    if not want then Log("DLC weapon " .. tostring(dlcWeapon) .. " failed to load; leaving it unchanged") return end
+    if valid(cur) and cur:GetAddress() == want:GetAddress() then return end
+    Log(DLC_PROP .. " was " .. (valid(cur) and cur:GetFullName() or tostring(cur)))
+    local okSet, err = pcall(function() bp[DLC_PROP] = want end)
+    if okSet then
+        Log("DLC weapon set to " .. want:GetFullName() .. " on " .. bp:GetFullName())
+        return
+    end
+    -- Type of the property is only known from the exe's name table; log it for diagnosis.
+    local ptype = "?"
+    pcall(function()
+        bp:GetClass():ForEachProperty(function(prop)
+            if prop:GetFName():ToString() == DLC_PROP then ptype = prop:GetClass():GetFName():ToString() return true end
+        end)
+    end)
+    Log("Setting " .. DLC_PROP .. " (" .. ptype .. ") failed: " .. tostring(err))
+end
+
+-- Apply the moment a Backpack is created. NotifyOnNewObject fires while the object is still
+-- being constructed (its properties get initialised afterwards), so the actual write is
+-- deferred to the game thread. The poll loop below re-checks every 0.5 s as a backup.
+local function WatchNewBackpacks()
+    local ok, err = pcall(function()
+        NotifyOnNewObject("/Script/Game.Backpack", function(obj)
+            ExecuteInGameThread(function()
+                if valid(obj) and not obj:GetFullName():find("Default__") then
+                    Log("New Backpack created: " .. obj:GetFullName())
+                    ApplyDlcWeapon(obj)
+                end
+            end)
+        end)
+    end)
+    Log(ok and "Watching for new Backpacks (DLC weapon)" or ("NotifyOnNewObject failed: " .. tostring(err)))
+end
+
+local function SetDlcWeapon(asset)
+    local w = nil
+    if asset and asset:lower() ~= "default" then
+        w = FindWeaponByAsset(asset)
+        if not w then Notify("Unknown weapon " .. tostring(asset)) return end
+    end
+    dlcWeapon = (w and w[2] ~= DLC_DEFAULT_ASSET) and w[2] or nil
+    local saved = SaveDlcSetting()
+    ApplyDlcWeapon(GetBackpack(true))
+    if RC_UI_SetDlcWeapon then pcall(RC_UI_SetDlcWeapon, dlcWeapon or "default") end
+    Notify("DLC starting weapon: " .. DlcWeaponName() .. " (from the next level start)"
+           .. (saved and "" or "  [not saved, see log]"))
 end
 
 ----------------------------------------------------------------------------
@@ -1023,6 +1140,23 @@ RegisterConsoleCommandHandler("givechipraw", function(_, Params, Ar)
     return true
 end)
 
+RegisterConsoleCommandHandler("dlcweapon", function(_, Params, Ar)
+    if #Params < 1 then
+        Out(Ar, "DLC starting weapon: " .. DlcWeaponName())
+        Out(Ar, "Usage: dlcweapon <index|name|default>   (see givelist)")
+        return true
+    end
+    local q = table.concat(Params, " ")
+    local asset = "default"
+    if q:lower() ~= "default" then
+        local w = FindWeapon(q)
+        if not w then Out(Ar, "No weapon matches '" .. q .. "'") return true end
+        asset = w[2]
+    end
+    ExecuteInGameThread(function() SetDlcWeapon(asset) end)
+    return true
+end)
+
 RegisterConsoleCommandHandler("boardlist", function(_, _, Ar)
     ExecuteInGameThread(function()
         for i, r in ipairs(GetBoardRows()) do Out(Ar, string.format("%2d  %s", i, r)) end
@@ -1051,6 +1185,10 @@ end)
 local uiConnected = false
 local uiBoardsPushed = false
 local uiBoardRetry = 0
+local dlcBackpackRetry = 0
+
+LoadDlcSetting()
+WatchNewBackpacks()
 
 local function HandleUiRequest(req)
     local words = {}
@@ -1062,6 +1200,8 @@ local function HandleUiRequest(req)
                  tonumber(words[4]) or (DEFAULT_CHIP_TIER + 1))
     elseif kind == "board" then
         GiveBoard(asset)
+    elseif kind == "dlcweapon" then
+        SetDlcWeapon(asset)
     elseif kind == "give" then
         for _, w in ipairs(WEAPONS) do
             if w[2] == asset then GiveWeapon(w) return end
@@ -1075,12 +1215,21 @@ local function HandleUiRequest(req)
 end
 
 LoopInGameThreadWithDelay(100, function()
+    -- DLC weapon backup: keep the live Backpack's DLC weapon on the chosen class
+    -- (ApplyDlcWeapon does nothing when it already is).
+    dlcBackpackRetry = dlcBackpackRetry - 1
+    if dlcBackpackRetry <= 0 then
+        dlcBackpackRetry = 5
+        local bp = GetBackpack(true)
+        if bp then ApplyDlcWeapon(bp) end
+    end
     if not RC_UI_Pop then return end
     if not uiConnected then
         uiConnected = true
         RC_UI_Clear()
         for _, w in ipairs(WEAPONS) do RC_UI_AddWeapon(w[1], w[2]) end
         for _, a in ipairs(AMMO) do RC_UI_AddAmmo(a[1], a[2]) end
+        if RC_UI_SetDlcWeapon then RC_UI_SetDlcWeapon(dlcWeapon or "default") end
         Log("GUI tab connected.")
     end
     -- Board rows need the DataTable loaded, so wait until a player exists; retry every ~5 s.
@@ -1105,4 +1254,4 @@ LoopInGameThreadWithDelay(100, function()
     end
 end)
 
-Log("Loaded. F7/F8 select, F9 give, F6 dump API. Console: givelist, give, giveammo, rcdump, givechip, boardlist, giveboard, rcchipdump.")
+Log("Loaded. F7/F8 select, F9 give, F6 dump API. Console: givelist, give, giveammo, rcdump, givechip, boardlist, giveboard, dlcweapon, rcchipdump.")
