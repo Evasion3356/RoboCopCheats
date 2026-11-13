@@ -25,8 +25,7 @@ local AMMO_DIR   = "/Game/Blueprints/Items/Ammo/"
 
 -- Display name, asset name. Paths come from Manifest_UFSFiles_Win64.txt.
 local WEAPONS = {
-    { "Auto-9",                     "WP_BerettaAuto9" },
-    { "Pistol",                     "WP_Pistol" },
+    -- Removed: WP_BerettaAuto9 (RoboCop always has the Auto-9) and WP_Pistol (spawns broken).
     { "SIG Sauer",                  "WP_SigSauer" },
     { "Desert Eagle",               "WP_DesertEagle" },
     { "Uzi",                        "WP_SmgUzi" },
@@ -35,24 +34,39 @@ local WEAPONS = {
     { "AKM",                        "WP_AKM" },
     { "Steyr AUG",                  "WP_SteyrAUG" },
     { "HK G11",                     "WP_HKG11" },
-    { "Heckler & Koch",             "WP_Hecklerkoch" },
     { "HK21",                       "WP_HK21" },
-    { "FN Minimi",                  "WP_FnMinimi" },
     { "M60",                        "WP_BrowningM60" },
+    -- Removed: WP_Hecklerkoch and WP_FnMinimi are unfinished (meshes with no materials or
+    -- textures in the manifest). They spawn as a white gun that breaks the game.
     { "Mossberg",                   "WP_Mossberg" },
     { "OCP Combat Shotgun",         "WP_MossbergBullpup" },
     { "SPAS-12",                    "WP_Spas12" },
-    { "Remington Shotgun",          "WP_ShotgunRemington" },
-    { "Sniper Rifle",               "WP_SniperRifle" },
+    -- Removed: WP_ShotgunRemington and WP_SniperRifle (both spawn broken).
     { "Barrett M82 Sniper",         "WP_BarrettM82_Sniper" },
     { "Cobra Assault Cannon",       "WP_BarrettM82_explosive" },
-    { "Grenade Launcher",           "WP_GrenadeLauncher" },
-    { "M79",                        "WP_GrenadeLauncherM79" },
     { "MM-1",                       "WP_MM1GL" },
-    { "Rocket Launcher",            "WP_RocketLauncher" },
     { "ATGM",                       "WP_ATGM" },
-    { "Baseball Bat",               "WP_BaseballBat" },
-    { "Mounted Minigun (cut)",      "WP_MountedMinigun" },
+    -- Removed: WP_BaseballBat (spawns but can't be used; melee probably goes through
+    -- Backpack:SetMeleeWeapon and the DLC1 WP_MeleeWeapon_* classes instead).
+    -- Removed: WP_GrenadeLauncher, WP_GrenadeLauncherM79, WP_RocketLauncher and
+    -- WP_MountedMinigun (all don't work when spawned).
+}
+
+-- Display name, ammo item class (/Game/Blueprints/Items/Ammo/).
+-- Items have no display-name data, so each is named after the weapons whose AmmoItem
+-- property points at it (read from the weapon defaults in game, 2026-11-13). Only ammo
+-- used by a weapon above is listed (the Auto-9 has infinite ammo, so B_AmmoAuto9 is left out).
+local AMMO = {
+    { "SIG Sauer",                               "B_AmmoSmall" },
+    { "Desert Eagle",                            "B_AmmoSmall44" },
+    { "SMG (Uzi, TEC-9, Sterling)",              "B_AmmoSmg" },
+    { "Rifle (AKM, AUG, G11, HK21)",             "B_AmmoRifle" },
+    { "LMG (M60)",                               "B_AmmoLMG" },
+    { "Shotgun (Mossberg, OCP, SPAS-12)",        "B_AmmoShotgun" },
+    { "Sniper (Barrett M82)",                    "B_AmmoSniper" },
+    { "Cobra Assault Cannon",                    "B_AmmoCobra" },
+    { "Grenades (MM-1)",                         "B_AmmoGrenade" },
+    { "Rockets (ATGM)",                          "B_AmmoRocket" },
 }
 
 local selected = 1
@@ -66,6 +80,8 @@ end
 
 local function Notify(msg)
     Log(msg)
+    -- Status line in the "Weapon Spawner" GUI tab (provided by dlls/main.dll, if present).
+    if WS_UI_Status then pcall(WS_UI_Status, msg) end
     -- Best effort on-screen text. May be invisible in a shipping build; harmless if so.
     pcall(function()
         local pc = UEHelpers.GetPlayerController()
@@ -84,8 +100,19 @@ local function LoadClass(dir, assetName)
     local classPath = dir .. assetName .. "." .. assetName .. "_C"
     local cls = StaticFindObject(classPath)
     if not valid(cls) then
-        pcall(LoadAsset, dir .. assetName)
-        cls = StaticFindObject(classPath)
+        -- Not in memory yet (weapon not used in this level). Try the path forms
+        -- LoadAsset accepts, logging each failure so we can see which one works.
+        local candidates = {
+            classPath,                                   -- /Game/.../WP_X.WP_X_C
+            dir .. assetName .. "." .. assetName,        -- /Game/.../WP_X.WP_X
+            dir .. assetName,                            -- /Game/.../WP_X
+        }
+        for _, path in ipairs(candidates) do
+            local ok, res = pcall(LoadAsset, path)
+            if not ok then Log("LoadAsset('" .. path .. "') error: " .. tostring(res)) end
+            cls = StaticFindObject(classPath)
+            if valid(cls) then Log("Loaded via LoadAsset('" .. path .. "')") break end
+        end
     end
     if not valid(cls) then
         Log("Could not load class " .. classPath)
@@ -94,33 +121,32 @@ local function LoadClass(dir, assetName)
     return cls
 end
 
--- Returns the Backpack belonging to the local player.
+-- Returns the Backpack of the *current* game state (BP_MyGameState_C_x.Backpack_0).
+-- After a death/checkpoint reload the old game state's Backpack can still be in memory
+-- while it is being torn down; adding a weapon to that one can crash the game, so we
+-- never fall back to "any Backpack" when more than one exists.
 local function GetBackpack()
-    local pawn = UEHelpers.GetPlayer()
+    local gs = nil
+    pcall(function() gs = UEHelpers.GetWorld().GameState end)
 
-    -- 1) A GetBackpack() UFunction on the pawn or controller, if one exists.
-    for _, owner in ipairs({ pawn, UEHelpers.GetPlayerController() }) do
-        if valid(owner) then
-            local ok, bp = pcall(function() return owner:GetBackpack() end)
-            if ok and valid(bp) then return bp end
-        end
-    end
-
-    -- 2) Any live Backpack object, preferring one owned by the player pawn.
-    local all = FindAllOf("Backpack")
-    if all then
-        local fallback = nil
-        for _, bp in ipairs(all) do
-            if valid(bp) and not bp:GetFullName():find("Default__") then
+    local all = FindAllOf("Backpack") or {}
+    local live = {}
+    for _, bp in ipairs(all) do
+        if valid(bp) and not bp:GetFullName():find("Default__") then
+            table.insert(live, bp)
+            if valid(gs) then
                 local ok, outer = pcall(function() return bp:GetOuter() end)
-                if ok and valid(outer) and valid(pawn) and outer:GetAddress() == pawn:GetAddress() then
+                if ok and valid(outer) and outer:GetAddress() == gs:GetAddress() then
                     return bp
                 end
-                fallback = fallback or bp
             end
         end
-        if fallback then return fallback end
     end
+
+    if #live == 1 and not valid(gs) then return live[1] end
+    Log(string.format("No Backpack on the current GameState (%s); %d Backpack object(s) in memory:",
+        valid(gs) and gs:GetFullName() or "GameState not found", #live))
+    for _, bp in ipairs(live) do Log("    " .. bp:GetFullName()) end
     return nil
 end
 
@@ -136,9 +162,13 @@ local function GetFunctionParams(obj, funcName)
                 if fn:GetFName():ToString() == funcName then
                     found = true
                     fn:ForEachProperty(function(prop)
+                        -- CPF_OutParm = 0x100, CPF_ReferenceParm = 0x8000000
+                        local okF, isOut = pcall(function() return prop:HasAnyPropertyFlags(0x100) end)
+                        local okR, isRef = pcall(function() return prop:HasAnyPropertyFlags(0x8000000) end)
                         table.insert(params, {
                             name = prop:GetFName():ToString(),
                             type = prop:GetClass():GetFName():ToString(),
+                            out  = (okF and isOut) and not (okR and isRef),
                         })
                     end)
                     return true -- stop iterating
@@ -154,12 +184,12 @@ end
 local function SignatureString(funcName, params)
     if not params then return funcName .. "  <not found>" end
     local parts = {}
-    for _, p in ipairs(params) do table.insert(parts, p.type .. " " .. p.name) end
+    for _, p in ipairs(params) do table.insert(parts, (p.out and "out " or "") .. p.type .. " " .. p.name) end
     return funcName .. "(" .. table.concat(parts, ", ") .. ")"
 end
 
 local INTERESTING = {
-    "AddWeaponToBackpack", "SpawnWeaponAndAddToBackpack", "TryToAddDlcWeaponToBackpack",
+    "AddWeaponToBackpack", "TryToAddDlcWeaponToBackpack",
     "AddItemsOfClassToBackpack", "AddItemsToBackpack", "HowManyItemsOfClassCanFitToBackpack",
     "AddPredefinedChip",
 }
@@ -195,6 +225,12 @@ local function BuildArgs(params, ctx)
         local n, t = p.name:lower(), p.type
         if n == "returnvalue" then
             -- skip
+        elseif p.out then
+            -- Pure output (e.g. AmmoAdded): UE4SS fills a table we pass in.
+            local box = {}
+            ctx.outs = ctx.outs or {}
+            ctx.outs[p.name] = box
+            table.insert(args, box)
         elseif t == "ClassProperty" or t == "SoftClassProperty" then
             table.insert(args, ctx.class)
         elseif t == "BoolProperty" then
@@ -220,6 +256,11 @@ local function TryCall(obj, funcName, ctx)
     Log("Calling " .. SignatureString(funcName, params))
     local ok, err = pcall(function() obj[funcName](obj, table.unpack(args)) end)
     if not ok then return false, funcName .. " errored: " .. tostring(err) end
+    for name, box in pairs(ctx.outs or {}) do
+        local v = box[1]; if v == nil then v = box.Value end
+        if v == nil then for _, x in pairs(box) do v = x break end end
+        Log("  out " .. name .. " = " .. tostring(v))
+    end
     return true
 end
 
@@ -229,16 +270,13 @@ end
 local function GiveWeapon(entry)
     local display, asset = entry[1], entry[2]
     local bp = GetBackpack()
-    if not bp then Notify("No Backpack found. Load into a level first.") return end
+    if not bp then Notify("No Backpack found (loading? dead?). Try again in a moment.") return end
+    Log("Using " .. bp:GetFullName())
     local cls = LoadClass(WEAPON_DIR, asset)
     if not cls then Notify("Could not load " .. asset) return end
 
-    -- Preferred: spawn-and-add by class (acts like a pickup, with default ammo).
-    local ok, why = TryCall(bp, "SpawnWeaponAndAddToBackpack", { class = cls })
-    if ok then Notify("Gave " .. display) return end
-    Log(why)
-
-    -- Fallback: AddWeaponToBackpack. If it wants an actor instance, spawn one first.
+    -- AddWeaponToBackpack(Weapon, bAddDefaultAmmo, out AmmoAdded): spawn the actor, then add it.
+    -- Verified 2026-11-13: AUG/M60/AKM arrive fully loaded, same as a real pickup.
     local ctx = { class = cls }
     local params = GetFunctionParams(bp, "AddWeaponToBackpack")
     if params then
@@ -254,7 +292,7 @@ local function GiveWeapon(entry)
             end
         end
     end
-    ok, why = TryCall(bp, "AddWeaponToBackpack", ctx)
+    local ok, why = TryCall(bp, "AddWeaponToBackpack", ctx)
     if ok then Notify("Gave " .. display) return end
     Log(why)
 
@@ -270,8 +308,12 @@ local function GiveAmmo(assetName, amount)
     if not bp then Notify("No Backpack found.") return end
     local cls = LoadClass(AMMO_DIR, assetName)
     if not cls then Notify("Unknown ammo class " .. assetName) return end
+    local label = assetName
+    for _, a in ipairs(AMMO) do
+        if a[2]:lower() == assetName:lower() then label = a[1] .. " ammo" break end
+    end
     local ok, why = TryCall(bp, "AddItemsOfClassToBackpack", { class = cls, amount = amount })
-    Notify(ok and ("Added " .. amount .. " " .. assetName) or ("Ammo failed: " .. why))
+    Notify(ok and ("Added " .. amount .. " " .. label) or ("Ammo failed: " .. why))
 end
 
 local function FindWeapon(query)
@@ -325,6 +367,12 @@ end)
 
 RegisterConsoleCommandHandler("give", function(_, Params, Ar)
     if #Params < 1 then Out(Ar, "Usage: give <index|name>   (see givelist)") return true end
+    if Params[1]:lower():find("^b_ammo") then
+        local amount = tonumber(Params[2]) or DEFAULT_AMMO_AMOUNT
+        Out(Ar, "That's ammo, treating as: giveammo " .. Params[1] .. " " .. amount)
+        ExecuteInGameThread(function() GiveAmmo(Params[1], amount) end)
+        return true
+    end
     local w = FindWeapon(table.concat(Params, " "))
     if not w then Out(Ar, "No weapon matches '" .. Params[1] .. "'") return true end
     ExecuteInGameThread(function() GiveWeapon(w) end)
@@ -341,6 +389,42 @@ end)
 RegisterConsoleCommandHandler("wsdump", function()
     ExecuteInGameThread(DumpApi)
     return true
+end)
+
+----------------------------------------------------------------------------
+-- GUI tab bridge. dlls/main.dll registers the WS_UI_* globals right after this
+-- script starts, so we connect lazily from a game-thread loop.
+----------------------------------------------------------------------------
+local uiConnected = false
+
+local function HandleUiRequest(req)
+    local kind, asset, amount = req:match("^(%S+)%s+(%S+)%s*(%d*)$")
+    if kind == "give" then
+        for _, w in ipairs(WEAPONS) do
+            if w[2] == asset then GiveWeapon(w) return end
+        end
+        Notify("Unknown weapon " .. tostring(asset))
+    elseif kind == "ammo" then
+        GiveAmmo(asset, tonumber(amount) or DEFAULT_AMMO_AMOUNT)
+    else
+        Log("Ignoring UI request: " .. req)
+    end
+end
+
+LoopInGameThreadWithDelay(100, function()
+    if not WS_UI_Pop then return end
+    if not uiConnected then
+        uiConnected = true
+        WS_UI_Clear()
+        for _, w in ipairs(WEAPONS) do WS_UI_AddWeapon(w[1], w[2]) end
+        for _, a in ipairs(AMMO) do WS_UI_AddAmmo(a[1], a[2]) end
+        Log("GUI tab connected.")
+    end
+    local req = WS_UI_Pop()
+    if req then
+        local ok, err = pcall(HandleUiRequest, req)
+        if not ok then Notify("Error: " .. tostring(err)) end
+    end
 end)
 
 Log("Loaded. F7/F8 select, F9 give, F6 dump API. Console: givelist, give, giveammo, wsdump.")

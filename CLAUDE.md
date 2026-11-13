@@ -1,15 +1,27 @@
 # WeaponSpawner — RoboCop: Rogue City mod
 
-Goal: an in-game way (hotkeys/console now, maybe a clickable menu later) to spawn any weapon **with working ammo**, replacing the old Cheat Engine + console-command workflow.
+Goal: an in-game way (clickable menu + hotkeys/console) to spawn any weapon **with working ammo**, replacing the old Cheat Engine + console-command workflow.
 
 ## Layout
 - `Win64/` — exact mirror of what gets copied into the game's `Game\Binaries\Win64\` folder.
-  - `dwmapi.dll` + `ue4ss/` = RE-UE4SS **v4.0.0** (stable, released 2026-11-12).
-  - `ue4ss/Mods/WeaponSpawner/Scripts/main.lua` — **our mod** (the only file we author).
+  - `dwmapi.dll` + `ue4ss/` = RE-UE4SS **v4.0.0** (stable, released 2026-11-12). Official binaries, not rebuilt.
+  - `ue4ss/Mods/WeaponSpawner/Scripts/main.lua` — **our Lua mod**: all game interaction (give weapon/ammo), hotkeys, console commands.
+  - `ue4ss/Mods/WeaponSpawner/dlls/main.dll` — **our C++ mod** (build output of `cpp/`): only draws the "Weapon Spawner" GUI tab.
   - `ue4ss/Mods/mods.txt` — `WeaponSpawner : 1` added above the `Keybinds` line (Keybinds must stay last).
-  - `ue4ss/UE4SS-settings.ini` — only change: `ConsoleEnabled = 1` (external log window). Set back to 0 when done debugging.
-- `_downloads/` — original UE4SS zip + zCustomGameConfigs (no RoboCop entry exists; defaults expected to work). Reference only.
+  - `ue4ss/UE4SS-settings.ini` — changes: `ConsoleEnabled = 1` (external log window), `EnableHotReloadSystem = 1` (Ctrl+R reloads all mods, same as the GUI's "Restart All Mods"), `GuiConsoleEnabled = 1` + `GuiConsoleVisible = 1` (GUI window with our tab; Ctrl+O toggles). Console can go back to 0 when done debugging; the GUI ones must stay 1 for the menu.
+- `cpp/` — C++ mod source. `cpp/CMakeLists.txt` pulls in `_deps/RE-UE4SS`; `cpp/WeaponSpawner/dllmain.cpp` is the tab. Post-build copies the DLL to `Win64/ue4ss/Mods/WeaponSpawner/dlls/main.dll`.
+- `_deps/RE-UE4SS/` (gitignored) — UE4SS source at tag **v4.0.0** with submodules (UEPseudo is private; user's GitHub has access). Submodules use SSH URLs; fetch with `git -c url."https://github.com/".insteadOf="git@github.com:" submodule update --init --recursive --depth 1`.
+- `_downloads/` — original UE4SS zip + zCustomGameConfigs (no RoboCop entry exists; defaults work). Reference only.
 - `README.txt` — user-facing install/usage.
+
+## Building the C++ mod
+- Toolchain: VS 2026 Community (MSVC 14.51), its bundled CMake + Ninja, Rust stable (needed by patternsleuth).
+- From a VS x64 dev environment (`vcvars64.bat`) in `cpp/`:
+  `cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Game__Shipping__Win64` then `cmake --build build --target WeaponSpawner`.
+- ABI check: every UE4SS.dll import of `main.dll` must exist in the **official** `Win64/ue4ss/UE4SS.dll` exports (`dumpbin /imports` vs `/exports`). Verified 2026-11-13: 26/26 present.
+- The game locks `main.dll` while running, so C++ changes need a game restart. Lua changes: Ctrl+R / Restart All Mods.
+- **ImGui rule:** the DLL has its own ImGui copy. Every tab callback must call `bind_ue4ss_imgui()` first. UE4SS only fires `on_ui_init` at initial startup, never after a reload, so `UE4SS_ENABLE_IMGUI()` alone leaves a reloaded DLL with a null context.
+- Crash triage: UE4SS writes `ue4ss/crash_*.dmp`. With no WinDbg installed, parse it with the `minidump` pip package, then symbolize `main.dll+offset` via dbghelp `SymFromAddr`/`SymGetLineFromAddr` against `cpp/build/WeaponSpawner/WeaponSpawner.pdb`.
 
 ## Game facts
 - Install: `C:\Program Files (x86)\Steam\steamapps\common\Robocop Rogue City`
@@ -17,35 +29,46 @@ Goal: an in-game way (hotkeys/console now, maybe a clickable menu later) to spaw
 - `Manifest_UFSFiles_Win64.txt` in the install root lists **every asset path** — grep it instead of guessing paths.
 - Weapons: `/Game/Blueprints/WeaponsNew/WP_<Name>` → class path `/Game/Blueprints/WeaponsNew/WP_X.WP_X_C`.
   Also `/Game/Blueprints/Weapons/DLC1/WP_MeleeWeapon*` (bat, hammer).
-- Ammo items: `/Game/Blueprints/Items/Ammo/B_Ammo<Type>` (27 of them; newer ones like `B_AmmoMedium556/762`, `B_Ammo762` exist that weren't around in 2023).
+- Ammo items: `/Game/Blueprints/Items/Ammo/B_Ammo<Type>` (27 exist). Items have **no display-name data** (checked 2026-11-13: only socket/net names on the class defaults). Each weapon's ammo is its `AmmoItem` (ClassProperty) default; main.lua `AMMO` lists only the 10 used by listed weapons, named after their weapons (no Auto-9: it has infinite ammo).
 - Cheat manager BP: `/Game/Blueprints/Abstract/Player/BP_MyCheatManager`.
-- Native names found as strings in the exe (signatures NOT yet confirmed):
-  `UBackpack`, `AddWeaponToBackpack` (has a `bAddDefaultAmmo` param), `SpawnWeaponAndAddToBackpack`,
-  `TryToAddDlcWeaponToBackpack`, `AddItemsOfClassToBackpack`, `AddItemsToBackpack`,
-  `HowManyItemsOfClassCanFitToBackpack`, `GetBackpack`, `AddPredefinedChip`, `ABackpackItem`, `AWeapon`.
-- The native script module name (`/Script/???`) was not found in the exe — the mod locates the Backpack via `FindAllOf("Backpack")` instead.
+- Native module is `/Script/Game`. Backpack = `/Script/Game.Backpack`, lives on `BP_MyGameState_C_0.Backpack_0`. Confirmed signatures (F6 dump, 2026-11-13):
+  `AddWeaponToBackpack(Object Weapon, bool bAddDefaultAmmo, out int AmmoAdded)`,
+  `AddItemsOfClassToBackpack(Class, int Amount, bool bShowHUDInfo) -> int`,
+  `AddItemsToBackpack(Object Item, int Amount, bool bShowHUDInfo) -> int`,
+  `TryToAddDlcWeaponToBackpack(enum DLCType)`, `AddPredefinedChip(enum NewConnectionType, int BoostValue, int NewRotationOffset, int NewChipTier)`.
+  **`SpawnWeaponAndAddToBackpack` does NOT exist on Backpack.** Also has `GetFixedAmmoTypeAmount`, `GetItemsOfClassAmount`, `ClearAdditionalWeapons`.
 
 ## History / why this exists (from the user's 2023 FearLess forum posts)
 - `CheatManager.AddWeapon WP_X` gives the gun with **no ammo**.
 - Adding ammo via `Add <amount> B_AmmoX` worked for Cobra/Small44 but **not** Rifle/LMG/Minigun.
 - Cheat Engine "infinite ammo" scripts broke weapon swapping and pickups (AR/LMG), even corrupting saves.
-- Hypothesis driving this mod: calling the Backpack's own add path with default ammo behaves like a real pickup and avoids all of that.
+- This mod's approach (Backpack's own add path with default ammo) is **confirmed to fix it**.
 
-## How main.lua works
-- Hotkeys: F7/F8 cycle selection, F9 give, F6 dump Backpack API to `ue4ss/UE4SS.log`.
-- Console: `givelist`, `give <index|name>`, `giveammo <B_AmmoX> [amount]`, `wsdump`.
-- Reflection: reads UFunction params at runtime (`ForEachFunction` / `ForEachProperty`) and builds args by property type (class → weapon class, bool named *ammo*/*equip* → true, numbers → amount, object → spawned actor).
-- Give order: `SpawnWeaponAndAddToBackpack` → `AddWeaponToBackpack` (spawns actor if it wants an instance) → `CheatManager:AddWeapon` fallback.
-- Game-thread work goes through `ExecuteInGameThread`.
+## How it works
+- Lua: give = load class (`StaticFindObject`, else `LoadAsset("/Game/.../WP_X.WP_X_C")`) → `SpawnActor` at player → `Backpack:AddWeaponToBackpack(actor, true, …)`. Ammo = `AddItemsOfClassToBackpack`. Game-thread work via `ExecuteInGameThread` / `LoopInGameThreadWithDelay`.
+- Hotkeys: F7/F8 cycle selection, F9 give, F6 dump Backpack API. Console: `givelist`, `give <index|name>`, `giveammo <B_AmmoX> [amount]` (`give B_AmmoX` also works), `wsdump`.
+- GUI bridge: C++ `on_lua_start` (same-named Lua mod) registers globals `WS_UI_Clear/AddWeapon/AddAmmo/Pop/Status` into the Lua state. Lua polls `WS_UI_Pop()` every 100 ms on the game thread; requests are `"give <asset>"` / `"ammo <asset> <n>"`. Shared state behind a mutex (GUI thread vs game thread). Weapon/ammo lists live only in main.lua and are pushed to the tab.
 
 ## Status
-- [x] UE4SS staged, mod written.
-- [ ] **Not yet run in game.** Lua not syntax-checked (no lua/luac on this machine).
-- [ ] Get F6 dump from `UE4SS.log` → confirm real signatures, fix arg building.
-- [ ] Verify ammo works for AKM / M60 / SPAS-12 (the historically broken ones).
-- [ ] Decide on UI: keep hotkeys, or C++ UE4SS mod with an ImGui tab for a clickable menu. On-screen `ClientMessage` may be invisible in shipping.
-- [ ] Later ideas: precise chip spawner via `AddPredefinedChip`.
+- [x] UE4SS staged and running in game; Lua mod works.
+- [x] **Ammo works** (2026-11-13): AUG, M60, AKM arrive fully loaded. Giving a gun swaps out the one in the same slot (AUG dropped the pistol), like a real pickup.
+- [x] C++ GUI tab written, built, ABI-checked, deployed (2026-11-13).
+- [x] GUI tab works in game (2026-11-13).
+- [x] **Unfinished weapons removed** (2026-11-13): `WP_FnMinimi` and `WP_Hecklerkoch` spawn as a white, game-breaking gun. Manifest confirms: meshes only, zero materials/textures (real guns have their own `M_/MI_/T_` assets). Removed from WEAPONS. Use the same manifest check (mesh vs material/texture counts) before adding weapons.
+- [x] Removed (2026-11-13): `WP_ShotgunRemington` and `WP_SniperRifle`, confirmed broken in game. The manifest heuristic predicted both (Remington's mesh is under `TerminatorWeapons/` with no materials; Sniper Rifle has no mesh of its own).
+- [x] Removed (2026-11-13), confirmed not working in game: `WP_GrenadeLauncher`, `WP_GrenadeLauncherM79`, `WP_RocketLauncher`, `WP_MountedMinigun`. (MM-1 and ATGM turned out to use `B_AmmoGrenade` / `B_AmmoRocket`.)
+- [x] GetBackpack hardened (2026-11-13): now only the Backpack whose outer is `World.GameState`, refuses if ambiguous, logs which one it uses (guards against a stale Backpack after death/reload).
+- [x] **GPU errors / unkillable process** (2026-11-13): the first GUI run with `GraphicsAPI = opengl` logged 3× `nvlddmkm` event 153 at startup (the only such events in 30 days); afterwards the process hung in the driver while exiting and needed a reboot. Switched to `GraphicsAPI = dx11`; the next run (17:33) had no driver errors. Saves backed up to `_savebackup/` (gitignored) beforehand.
+- [x] **Reload crash, root-caused and fixed** (2026-11-13): both Ctrl+R (17:36) and "Restart All Mods" (17:40) crashed. Both UE4SS dumps: access violation reading 0x1440 at `main.dll+0x2F77D` = `ImGui::TextWrapped` (first call in our tab), i.e. a null ImGui context. Cause: after a reload, UE4SS never calls `on_ui_init`, so the reloaded DLL's own ImGui copy never got UE4SS's context. Fix: `bind_ue4ss_imgui()` at the top of the tab callback. Hot reload re-enabled (it had been turned off as a workaround). Verified in game 2026-11-13: multiple reloads, no new dumps, no driver errors. Possibly worth reporting upstream: reinstall skips `fire_ui_init_for_cpp_mods()`.
+- [x] Also removed (2026-11-13): `WP_BerettaAuto9` (RoboCop's built-in gun, pointless) and `WP_Pistol` (spawns broken).
+- [x] **Every weapon in WEAPONS verified in game** (2026-11-13): all 17 spawn and arrive loaded with ammo (SIG Sauer, Desert Eagle, Uzi, TEC-9, Sterling Mk6, AKM, Steyr AUG, HK G11, HK21, M60, Mossberg, OCP Combat Shotgun, SPAS-12, Barrett M82, Cobra Assault Cannon, MM-1, ATGM). dx11 GUI: no NVIDIA errors since the switch.
+- [ ] User's current save already can't pick up the M60 (believed to be old 2023 Cheat Engine damage) — test on a fresh save.
+- [x] Ammo list trimmed to the 10 types kept weapons use (2026-11-13), mapping read from each weapon's `AmmoItem`. Removed weapons mostly had no valid `AmmoItem` at all. Ammo buttons show weapon-based names (`WS_UI_AddAmmo(display, asset)`; DLL rebuilt, Lua + DLL must be deployed together).
+- [x] Ammo giving via `AddItemsOfClassToBackpack` verified in game (2026-11-13 17:47): every type incl. Rifle, LMG and Auto-9 reported added; user confirmed it works. This fixes the 2023 `Add B_AmmoRifle/LMG` failure.
+- [ ] `AmmoAdded` out-param detection (`HasAnyPropertyFlags`) doesn't trigger; harmless, value just isn't logged.
+- [x] Removed `WP_BaseballBat` (2026-11-13): spawns but can't be used.
+- [ ] Later ideas: precise chip spawner via `AddPredefinedChip`; melee via `Backpack:SetMeleeWeapon` with the DLC1 `WP_MeleeWeapon_BaseballBat_Child` / `WP_MeleeWeapon_Hammer` (signature unknown; dump it first).
 
 ## Working rules
-- Edit files here in `Win64/`, then copy to the game folder to test (game folder is under Program Files).
+- Edit files here (`Win64/`, `cpp/`), then copy to the game folder to test (game folder is under Program Files).
 - Don't trust asset/function names from memory — grep the manifest or the F6 dump.

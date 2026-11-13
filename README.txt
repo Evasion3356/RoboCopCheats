@@ -8,7 +8,12 @@ INSTALL
 UNINSTALL
   Delete dwmapi.dll and the ue4ss\ folder from that Win64 folder.
 
-USE (once you are in a level)
+MENU
+  The "UE4SS Debugging Tools" window opens with the game. Open its "Weapon Spawner" tab
+  and click a weapon (comes with full ammo) or an ammo type (set Amount first).
+  Ctrl+O shows/hides that window. Easiest with the game in borderless/windowed mode.
+
+USE WITHOUT THE MENU (once you are in a level)
   F7 / F8   previous / next weapon        F9   give the selected weapon
   F6        dump Backpack function signatures to ue4ss\UE4SS.log
   Console: givelist | give <index|name> | giveammo <B_AmmoX> [amount] | wsdump
