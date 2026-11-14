@@ -1,0 +1,169 @@
+# Packages the mod, publishes it as a GitHub release and uploads it to Nexus
+# Mods (https://www.nexusmods.com/robocoproguecity/mods/98).
+#
+# Runs when a version tag (e.g. 1.1) is pushed, or by hand from the Actions
+# tab ("Run workflow") for a tag that already exists. Steps: check that the
+# tag matches MOD_VERSION in main.lua, build both zips with make_release.ps1,
+# take the release notes from the changelog section matching the tag,
+# create (or refresh) the GitHub release, then add the zips on Nexus as new
+# versions of the mod's two files (Full = main, Mod Only = optional). The
+# Full upload also sets the mod's version and adds the changelog entry.
+#
+# No compile step: the C++ menu DLL needs the private UEPseudo submodule to
+# build, so the release ships the committed, in-game-tested
+# Win64/ue4ss/Mods/RoboCopCheats/dlls/main.dll. Rebuild and commit it
+# locally before tagging when cpp/ changed.
+#
+# Nexus is skipped on a tag push when Nexus already shows that version (so
+# tagging a version that was uploaded by hand doesn't duplicate it). A manual
+# run only uploads when "nexus" is ticked.
+#
+# Needs the NEXUS_API_KEY repository secret (a personal API key from
+# https://www.nexusmods.com/settings/api-keys). NEXUS_MOD_ID is the mod's v3
+# API id (not the 98 in the URL); the file ids are the v3 mod-file ids from
+# GET /v3/mods/<NEXUS_MOD_ID>/files.
+
+name: Release
+
+on:
+  push:
+    tags: ['[0-9]*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and release (e.g. 1.1)
+        required: true
+      nexus:
+        description: Also upload it to Nexus Mods as a new version
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  PROJECT: RoboCopCheats
+  CHANGELOG: docs/CHANGELOG.md
+  NEXUS_GAME: robocoproguecity
+  NEXUS_GAME_SCOPED_ID: '98'
+  NEXUS_MOD_ID: '24897925415010'
+  NEXUS_FILE_ID_FULL: '8380659'
+  NEXUS_FILE_ID_MODONLY: '8380662'
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Check version
+        shell: pwsh
+        run: |
+          $lua = Get-Content Win64/ue4ss/Mods/RoboCopCheats/Scripts/main.lua -Raw
+          $ver = [regex]::Match($lua, 'local MOD_VERSION = "([^"]+)"').Groups[1].Value
+          if ($ver -ne $env:TAG) { throw "Tag $env:TAG doesn't match MOD_VERSION $ver in main.lua" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          ./make_release.ps1
+          "ZIP_FULL=dist/$env:PROJECT-$env:TAG-full.zip" >> $env:GITHUB_ENV
+          "ZIP_MODONLY=dist/$env:PROJECT-$env:TAG-modonly.zip" >> $env:GITHUB_ENV
+
+      # Tag 1.0 matches "## [1.0]" (or "## [1.0.0]") in the changelog. Nexus
+      # keeps its changelog one line per entry, so its copy has each wrapped
+      # bullet joined back onto one line.
+      - name: Release notes from changelog
+        id: notes
+        shell: pwsh
+        run: |
+          $lines = @(Get-Content $env:CHANGELOG)
+          $pattern = '^## \[' + [regex]::Escape($env:TAG) + '(\.0)*\]'
+          $start = -1
+          for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match $pattern) { $start = $i; break } }
+          if ($start -lt 0) { throw "No '## [$env:TAG]' section in $env:CHANGELOG" }
+          $version = [regex]::Match($lines[$start], '\[([^\]]+)\]').Groups[1].Value
+          $body = @(for ($i = $start + 1; $i -lt $lines.Count -and $lines[$i] -notmatch '^## '; $i++) { $lines[$i] })
+          (($body -join "`n").Trim()) | Set-Content notes.md -Encoding utf8
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+
+          $entries = [System.Collections.Generic.List[string]]::new()
+          foreach ($line in $body) {
+            $text = $line.Trim()
+            if (-not $text) { continue }
+            if ($entries.Count -eq 0 -or $text -match '^([-*] |#)') { $entries.Add($text) }
+            else { $entries[$entries.Count - 1] += " $text" }
+          }
+          $delimiter = "CHANGELOG_$([guid]::NewGuid().ToString('N'))"
+          "changelog<<$delimiter" >> $env:GITHUB_OUTPUT
+          $entries >> $env:GITHUB_OUTPUT
+          $delimiter >> $env:GITHUB_OUTPUT
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $title = "RoboCop Cheats $env:RELEASE_VERSION"
+          gh release view $env:TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $env:TAG --title $title --notes-file notes.md
+            gh release upload $env:TAG $env:ZIP_FULL $env:ZIP_MODONLY --clobber
+          } else {
+            gh release create $env:TAG $env:ZIP_FULL $env:ZIP_MODONLY --title $title --notes-file notes.md --verify-tag
+          }
+          if ($LASTEXITCODE) { throw "Publishing the release failed" }
+
+      # Public GraphQL, no key needed. "1.0" and "1.0.0" count as the same.
+      - name: Decide Nexus upload
+        id: nexus
+        shell: pwsh
+        run: |
+          $upload = '${{ github.event_name }}' -eq 'push' -or '${{ inputs.nexus }}' -eq 'true'
+          if ('${{ github.event_name }}' -eq 'push') {
+            $body = @{ query = "{ legacyModsByDomain(ids:[{gameDomain:`"$env:NEXUS_GAME`",modId:$env:NEXUS_GAME_SCOPED_ID}]) { nodes { version } } }" } | ConvertTo-Json
+            $live = (Invoke-RestMethod https://api.nexusmods.com/v2/graphql -Method Post -ContentType 'application/json' -Body $body).data.legacyModsByDomain.nodes[0].version
+            $norm = { param($v) ($v -replace '(\.0)+$', '') }
+            if ((& $norm $live) -eq (& $norm $env:TAG)) {
+              Write-Host "Nexus already shows version $live; skipping the upload."
+              $upload = $false
+            }
+          }
+          "upload=$($upload.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+
+      # Pinned to a commit rather than a tag, since it is handed the API key.
+      - name: Upload Full to Nexus Mods
+        if: steps.nexus.outputs.upload == 'true'
+        uses: Nexus-Mods/upload-action@c96019556046053aa26044b44396cd38929daf23 # v1.0.0-beta.10
+        with:
+          api_key: ${{ secrets.NEXUS_API_KEY }}
+          mod_id: ${{ env.NEXUS_MOD_ID }}
+          file_id: ${{ env.NEXUS_FILE_ID_FULL }}
+          filename: ${{ env.ZIP_FULL }}
+          display_name: RoboCopCheats Full
+          description: Includes RE-UE4SS v4.0.0. Extract into the game folder.
+          version: ${{ env.TAG }}
+          category: main
+          # false moves the previous version to "Old versions", where it stays
+          # downloadable; true archives it, which hides it from users.
+          archive_existing_version: false
+          update_mod_version: true
+          primary_mod_manager_download: true
+          changelog: ${{ steps.notes.outputs.changelog }}
+
+      - name: Upload Mod Only to Nexus Mods
+        if: steps.nexus.outputs.upload == 'true'
+        uses: Nexus-Mods/upload-action@c96019556046053aa26044b44396cd38929daf23 # v1.0.0-beta.10
+        with:
+          api_key: ${{ secrets.NEXUS_API_KEY }}
+          file_id: ${{ env.NEXUS_FILE_ID_MODONLY }}
+          filename: ${{ env.ZIP_MODONLY }}
+          display_name: RoboCopCheats Mod Only
+          description: For an existing RE-UE4SS v4.0.0 install.
+          version: ${{ env.TAG }}
+          category: optional
+          archive_existing_version: false
