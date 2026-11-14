@@ -31,7 +31,7 @@
                                    blueprint function call (to see what a click runs)
 
     Pause menu: "RoboCop Cheats" at the bottom of the game's pause menu opens the same
-    features as in-game pages (mouse only for now).
+    features as in-game pages (mouse, or arrow keys + Enter).
 
     Everything is logged with the [RoboCopCheats] prefix in ue4ss\UE4SS.log.
 ]]
@@ -1500,6 +1500,32 @@ local function MenuDump()
             DumpObject(list, stop)
         end
     end
+    -- Keyboard/controller navigation research: the element base class's API, and per button
+    -- whether it's focusable and which UMG navigation rules it has (Rule/Widget per direction).
+    local elemCls = StaticFindObject(MENU_GLOBALS .. "WB_ScrolledListElem.WB_ScrolledListElem_C")
+    Log("=== class WB_ScrolledListElem_C: " .. (valid(elemCls) and "loaded" or "NOT loaded") .. " ===")
+    if valid(elemCls) then DumpClassApi(elemCls, stop) end
+    for _, cn in ipairs({ "MenuWindowUserWidget", "MenuUserWidget" }) do
+        local cls = StaticFindObject("/Script/Game." .. cn)
+        Log("=== native class " .. cn .. ": " .. (valid(cls) and "found" or "NOT found") .. " ===")
+        if valid(cls) then DumpClassApi(cls, { [cn == "MenuWindowUserWidget" and "MenuUserWidget" or "UserWidget"] = true }) end
+    end
+    Log("=== Navigation of each menu button ===")
+    for _, b in ipairs(LiveInstances("WB_InGameMenuButton02_C")) do
+        local line = b:GetFName():ToString()
+        pcall(function() line = line .. '  "' .. b.Text:ToString() .. '"' end)
+        pcall(function() line = line .. "  bIsFocusable=" .. tostring(b.bIsFocusable) end)
+        pcall(function() line = line .. "  HasKeyboardFocus=" .. tostring(b:HasKeyboardFocus()) end)
+        pcall(function() line = line .. "  HasFocusedDescendants=" .. tostring(b:HasFocusedDescendants()) end)
+        Log("  " .. line)
+        local nav = nil
+        pcall(function() nav = b.Navigation end)
+        if valid(nav) then
+            DumpObject(nav, { Object = true })
+        else
+            Log("    Navigation: none (default rules)")
+        end
+    end
     MenuButtons(true)
     if #menus == 0 then
         Notify("No pause menu found. Open the pause menu (Esc), then run rcmenudump again.")
@@ -1523,9 +1549,13 @@ local function MenuWatch()
     for _, cn in ipairs(MENU_CLASSES) do table.insert(classes, { MENU_DIR, cn }) end
     table.insert(classes, { MENU_GLOBALS, "WB_ScrolledList" })
     table.insert(classes, { MENU_GLOBALS, "WB_ScrolledListElem" })
+    -- The menu's native parents (full path, no _C): in case navigation is handled in C++.
+    table.insert(classes, { "/Script/Game.", "MenuWindowUserWidget", native = true })
+    table.insert(classes, { "/Script/Game.", "MenuUserWidget", native = true })
     for _, dc in ipairs(classes) do
         local dir, cn = dc[1], dc[2]
-        local cls = StaticFindObject(dir .. cn .. "." .. cn .. "_C")
+        local clsPath = dc.native and (dir .. cn) or (dir .. cn .. "." .. cn .. "_C")
+        local cls = StaticFindObject(clsPath)
         if not valid(cls) then
             Log("[menuwatch] " .. cn .. " not loaded (open the pause menu once first)")
         else
@@ -1540,7 +1570,7 @@ local function MenuWatch()
             for _, fname in ipairs(names) do
                 local l = fname:lower()
                 if not (l:find("tick") or l:find("paint")) then
-                    local path = dir .. cn .. "." .. cn .. "_C:" .. fname
+                    local path = clsPath .. ":" .. fname
                     local key = cn .. ":" .. fname
                     local ok, pre, post = pcall(RegisterHook, path, function(self)
                         local n = (calls[key] or 0) + 1
@@ -1566,15 +1596,25 @@ end
 
 ----------------------------------------------------------------------------
 -- In-game pause menu: a "RoboCop Cheats" entry at the bottom of the pause menu. Clicking it
--- swaps the menu's buttons for our own pages (mouse only for now).
+-- swaps the menu's buttons for our own pages. Mouse, keyboard and controller.
 --
 -- How the pause menu works (rcmenudump / rcmenuwatch, 2026-11-13): every open creates a new
 -- WB_InGameMenu_C, which fills its WB_ScrolledList (ScrollBox_6) with WB_InGameMenuButton02
 -- buttons and calls the list's Finalize. A click reaches the menu as OnElementAction, and the
 -- menu picks the action from the clicked button's child index. Our buttons are added straight
--- to the ScrollBox, never via WB_ScrolledList:AddItem, so that handler never sees them; their
--- clicks are caught with a hook on WB_ScrolledListElem_C:OnMouseButtonUp. While one of our
--- pages is open the game's buttons are collapsed, not removed, so their indices don't change.
+-- to the ScrollBox, never via WB_ScrolledList:AddItem, so their OnElementAction is never bound
+-- to that handler; their clicks are caught with a hook on WB_ScrolledListElem_C:OnMouseButtonUp.
+-- While one of our pages is open the game's buttons are collapsed, not removed, so their
+-- indices don't change.
+--
+-- Keyboard/controller (rcmenuwatch, 2026-11-13): up/down runs the list's blueprint
+-- HandleNavigationInput, which steps through its Elements array (CurrentID = selected index)
+-- and calls SetActive/OnElementChoosenEvent. So our buttons are appended to Elements too.
+-- Enter/A runs the native MenuWindowUserWidget:HandleActionInput on the menu -> menu Action ->
+-- list OnActiveItemAction -> GetCurrentElement (Elements[CurrentID], None if CurrentID < 0) ->
+-- the menu's child-index handler, which casts the element and checks IsValid first. When the
+-- selected element is ours (or a hidden game button), a native pre-hook sets CurrentID to -1
+-- for the duration of the call so the game's handler gets None, and runs our action instead.
 ----------------------------------------------------------------------------
 local SLATE_COLLAPSED = 1
 local CHIP_MENU_PERCENTS = { 15, 23, 30, 38, 45, 75, 150, 300 }
@@ -1585,8 +1625,10 @@ local CHIP_LOOKS = { "Normal", "Style 2 (ring)", "Style 3", "Style 4" } -- same 
 local menuChipArms, menuChipPercent, menuChipLook = ARM_UP | ARM_DOWN, DEFAULT_CHIP_PERCENT, 1
 local menuAmmoAmount, menuSkillAmount = DEFAULT_AMMO_AMOUNT, DEFAULT_SKILL_POINTS
 
-local menuStates = {}   -- menu address -> { menu, page, buttons = {addr...}, gameVis = {addr -> visibility} }
-local cheatActions = {} -- our button's address -> { state, fn } (fn nil = status line, not clickable)
+-- menu address -> { menu, page, buttons = {addr...}, entries = {btn...}, gameVis = {addr -> visibility},
+--                   focus = entry index to select after the next redraw (nil = leave the game's choice) }
+local menuStates = {}
+local cheatActions = {} -- our button's address -> { state, fn, index } (fn nil = status line, not clickable)
 local currentMenuState = nil
 
 local function Addr(o)
@@ -1701,6 +1743,12 @@ PAGES.dlc = function()
     return t
 end
 
+local function MenuList(menu)
+    local list = nil
+    pcall(function() list = menu.WB_ScrolledList end)
+    return valid(list) and list or nil
+end
+
 local function MenuBox(menu)
     local box = nil
     pcall(function() box = menu.WB_ScrolledList.ScrollBox_6 end)
@@ -1719,28 +1767,142 @@ local function ForEachChild(panel, fn)
     for _, c in ipairs(kids) do fn(c) end
 end
 
+-- The list's Elements array as a Lua table (1-based). Read with ForEach only: indexing a
+-- TArray past its end grows it.
+local function ListElements(list)
+    local t = {}
+    pcall(function()
+        list.Elements:ForEach(function(_, e)
+            local o = e:get()
+            if valid(o) then table.insert(t, o) end
+        end)
+    end)
+    return t
+end
+
+local function SetListElements(list, objs)
+    local ok, err = pcall(function()
+        local arr = list.Elements
+        arr:Empty()
+        for i, o in ipairs(objs) do arr[i] = o end
+    end)
+    if not ok then Log("Pause menu: writing the list's Elements failed: " .. tostring(err)) end
+end
+
+-- Debug: Elements as "index:name:visible" (raw, including empty entries).
+local function DescribeElements(list)
+    local parts = {}
+    pcall(function()
+        list.Elements:ForEach(function(i, e)
+            local o = e:get()
+            local d = "None"
+            if valid(o) then
+                d = o:GetFName():ToString()
+                pcall(function() d = d .. ":" .. tostring(o:IsVisible()) end)
+            end
+            table.insert(parts, tostring(i) .. "=" .. d)
+        end)
+    end)
+    local id = "?"
+    pcall(function() id = tostring(list.CurrentID) end)
+    return "CurrentID=" .. id .. " [" .. table.concat(parts, ", ") .. "]"
+end
+
+local function IndexOf(t, obj)
+    local a = Addr(obj)
+    for i, o in ipairs(t) do
+        if Addr(o) == a then return i end
+    end
+    return nil
+end
+
+local function IsShown(w)
+    local ok, v = pcall(function() return w:IsVisible() end)
+    return ok and v
+end
+
+-- The selected element (Elements[CurrentID]) and CurrentID, or nil.
+local function SelectedElement(list)
+    local id = -1
+    pcall(function() id = list.CurrentID end)
+    if type(id) ~= "number" or id < 0 then return nil, id end
+    return ListElements(list)[id + 1], id
+end
+
+-- The WB_InGameMenu that owns a widget inside it (walks the outer chain).
+local function OwningMenu(obj)
+    local o = obj
+    for _ = 1, 6 do
+        if not valid(o) then return nil end
+        local ok, isMenu = pcall(function() return o:GetClass():GetFName():ToString() == "WB_InGameMenu_C" end)
+        if ok and isMenu then return o end
+        local okO, outer = pcall(function() return o:GetOuter() end)
+        o = okO and outer or nil
+    end
+    return nil
+end
+
+-- Select one of our buttons the way the list's own navigation does: deactivate the old
+-- element, point CurrentID at the new one, activate it.
+local function SelectElement(list, btn)
+    local elems = ListElements(list)
+    local idx = IndexOf(elems, btn)
+    if not idx then return end
+    local old = SelectedElement(list)
+    if valid(old) and Addr(old) ~= Addr(btn) then pcall(function() old:SetActive(false) end) end
+    pcall(function() list.CurrentID = idx - 1 end)
+    pcall(function() btn:SetActive(true) end)
+    local menu = OwningMenu(list)
+    local st = menu and menuStates[Addr(menu)]
+    if st then st.lastID = idx - 1 end
+end
+
+-- Our button addresses, also kept in a shared variable: hot reload (Ctrl+R) resets the Lua
+-- state but leaves an open pause menu's widgets, and those leftover buttons must be removed.
+local SHARED_BUTTONS = "RoboCopCheats_PauseMenuButtons"
+local staleButtons = {}
+pcall(function()
+    local s = ModRef:GetSharedVariable(SHARED_BUTTONS)
+    if type(s) == "string" then
+        for a in s:gmatch("%d+") do staleButtons[tonumber(a)] = true end
+    end
+end)
+
+local function SaveButtonList()
+    local t = {}
+    for a in pairs(cheatButtons) do table.insert(t, tostring(a)) end
+    pcall(function() ModRef:SetSharedVariable(SHARED_BUTTONS, table.concat(t, ",")) end)
+end
+
+local function IsStaleButton(o)
+    local a = Addr(o)
+    return a ~= nil and staleButtons[a] == true
+end
+
 local function AddMenuButton(state, box, sample, text, fn)
     local wbl = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
     local cls = MenuClass("WB_InGameMenuButton02")
-    if not (valid(wbl) and valid(cls)) then Log("Pause menu: WidgetBlueprintLibrary or button class not found") return end
+    if not (valid(wbl) and valid(cls)) then Log("Pause menu: WidgetBlueprintLibrary or button class not found") return nil end
     local okC, btn = pcall(function() return wbl:Create(state.menu, cls, UEHelpers.GetPlayerController()) end)
-    if not okC or not valid(btn) then Log("Pause menu: creating a button failed: " .. tostring(btn)) return end
+    if not okC or not valid(btn) then Log("Pause menu: creating a button failed: " .. tostring(btn)) return nil end
     local a = btn:GetAddress()
     cheatButtons[a] = btn
-    cheatActions[a] = { state = state, fn = fn }
     table.insert(state.buttons, a)
     pcall(function() btn.Text = FText(text) end)
     local okA, slot = pcall(function() return box:AddChild(btn) end)
-    if not okA then Log("Pause menu: AddChild failed: " .. tostring(slot)) return end
+    if not okA then Log("Pause menu: AddChild failed: " .. tostring(slot)) return nil end
+    table.insert(state.entries, btn)
+    cheatActions[a] = { state = state, fn = fn, index = #state.entries }
     pcall(function()
         local src = sample.Slot
         for _, f in ipairs({ "Padding", "HorizontalAlignment", "VerticalAlignment" }) do
             pcall(function() slot["Set" .. f](slot, src[f]) end)
         end
     end)
-    -- The list reveals its own buttons one by one (ShowDelay / ShowElem); ours aren't in its
-    -- Elements array, so without this they stay invisible (seen 2026-11-13).
+    -- The list reveals its own buttons one by one (ShowDelay / ShowElem) when it's built;
+    -- ours come later, so without this they stay invisible (seen 2026-11-13).
     pcall(function() btn:ShowElem() end)
+    return btn
 end
 
 local function ClearOurButtons(state)
@@ -1751,18 +1913,27 @@ local function ClearOurButtons(state)
         cheatActions[a] = nil
     end
     state.buttons = {}
+    state.entries = {}
 end
 
 -- Redraw a menu's list: the game's buttons + "RoboCop Cheats" (page nil), or one of our pages.
 local function RenderMenu(state)
     if not valid(state.menu) then return end
-    local box = MenuBox(state.menu)
-    if not box then return end
+    local box, list = MenuBox(state.menu), MenuList(state.menu)
+    if not (box and list) then return end
     -- Keep the scroll position when redrawing the same page (e.g. after picking a DLC
     -- weapon near the bottom); a different page starts at the top.
     local offset = 0
     if state.renderedPage == state.page then pcall(function() offset = box:GetScrollOffset() end) end
+    -- The game's own elements: Elements minus ours and leftovers from before a hot reload.
+    local gameElems = {}
+    for _, e in ipairs(ListElements(list)) do
+        if not (IsCheatButton(e) or IsStaleButton(e)) then table.insert(gameElems, e) end
+    end
     ClearOurButtons(state)
+    ForEachChild(box, function(c)
+        if IsStaleButton(c) then pcall(function() c:RemoveFromParent() end) end
+    end)
     local sample = nil
     ForEachChild(box, function(c)
         if IsCheatButton(c) then return end
@@ -1781,7 +1952,11 @@ local function RenderMenu(state)
             state.gameVis[a] = nil
         end
     end)
-    if not sample then return end
+    if not sample then
+        SetListElements(list, gameElems)
+        SaveButtonList()
+        return
+    end
     local entries
     if state.page then
         entries = PAGES[state.page]()
@@ -1789,6 +1964,29 @@ local function RenderMenu(state)
         entries = { { "RoboCop Cheats", function() OpenPage("root") end } }
     end
     for _, e in ipairs(entries) do AddMenuButton(state, box, sample, e[1], e[2]) end
+    -- Append ours to Elements so the list's keyboard/controller navigation reaches them.
+    -- ChildID = Elements index, the way the list's own AddInternal numbers its elements.
+    local all = {}
+    for _, e in ipairs(gameElems) do table.insert(all, e) end
+    for i, b in ipairs(state.entries) do
+        table.insert(all, b)
+        local id = #gameElems + i - 1
+        pcall(function() b.ChildID = id end)
+    end
+    SetListElements(list, all)
+    SaveButtonList()
+    if DEV_TOOLS then
+        Log("Pause menu: Elements after redraw: " .. DescribeElements(list))
+    end
+    -- Selection: on our pages always one of our entries (the game's are hidden); on the game's
+    -- page only when coming back from ours.
+    local focus = state.focus
+    if state.page and not focus then focus = 1 end
+    if focus and #state.entries > 0 then
+        SelectElement(list, state.entries[math.min(focus, #state.entries)])
+    end
+    state.focus = nil
+    pcall(function() state.lastID = list.CurrentID end)
     state.renderedPage = state.page
     pcall(function() box:SetScrollOffset(offset) end)
     if offset > 0 then
@@ -1804,6 +2002,7 @@ end
 
 -- Forget menus that are gone, so stale button addresses can't match new objects.
 local function PruneMenus()
+    local changed = false
     for ma, st in pairs(menuStates) do
         if not valid(st.menu) then
             for _, a in ipairs(st.buttons) do
@@ -1811,8 +2010,10 @@ local function PruneMenus()
                 cheatActions[a] = nil
             end
             menuStates[ma] = nil
+            changed = true
         end
     end
+    if changed then SaveButtonList() end
 end
 
 local function EnsureCheatMenu(menu, why)
@@ -1822,7 +2023,7 @@ local function EnsureCheatMenu(menu, why)
     if not ma then return end
     local st = menuStates[ma]
     if not st then
-        st = { menu = menu, page = nil, buttons = {}, gameVis = {} }
+        st = { menu = menu, page = nil, buttons = {}, entries = {}, gameVis = {} }
         menuStates[ma] = st
     end
     local box = MenuBox(menu)
@@ -1847,24 +2048,116 @@ local function OnCheatButtonClicked(btn)
     if not entry or not entry.fn then return end
     -- Deferred: the action usually redraws the list, which removes the clicked button.
     ExecuteInGameThread(function()
-        currentMenuState = entry.state
+        local st = entry.state
+        currentMenuState = st
+        local before = st.page
         local ok, err = pcall(entry.fn)
         if not ok then Notify("Error: " .. tostring(err)) end
-        RenderMenu(entry.state)
+        -- Keep the selection on the same entry (e.g. "Amount: 100"); a new page starts on
+        -- its first entry, and leaving our pages selects "RoboCop Cheats".
+        st.focus = (st.page == before) and entry.index or 1
+        RenderMenu(st)
     end)
 end
 
--- The WB_InGameMenu that owns a widget inside it (walks the outer chain).
-local function OwningMenu(obj)
-    local o = obj
-    for _ = 1, 6 do
-        if not valid(o) then return nil end
-        local ok, isMenu = pcall(function() return o:GetClass():GetFName():ToString() == "WB_InGameMenu_C" end)
-        if ok and isMenu then return o end
-        local okO, outer = pcall(function() return o:GetOuter() end)
-        o = okO and outer or nil
+local function StateOf(obj)
+    local menu = OwningMenu(obj)
+    return menu and menuStates[Addr(menu)] or nil
+end
+
+-- +1 / -1 for a HandleNavigationInput Direction value, from the enum's names (e.g.
+-- "EUINavigation::Down"); nil for anything else.
+local navDirNames = nil
+local function NavStep(value)
+    if not navDirNames then
+        navDirNames = {}
+        pcall(function()
+            local fn = StaticFindObject(MENU_GLOBALS .. "WB_ScrolledList.WB_ScrolledList_C:HandleNavigationInput")
+            fn:ForEachProperty(function(p)
+                if p:GetFName():ToString() == "Direction" then
+                    p:GetEnum():ForEachName(function(n, v) navDirNames[v] = n:ToString() end)
+                end
+            end)
+        end)
     end
+    local name = (navDirNames[value] or ""):lower()
+    if name:find("down") or name:find("next") or name:find("right") then return 1 end
+    if name:find("up") or name:find("prev") or name:find("left") then return -1 end
     return nil
+end
+
+-- After the list's own up/down. Its blueprint refuses to step onto our buttons (also when
+-- wrapping around to one), for a reason not visible from outside: logged 2026-11-13, ours
+-- differed from the game's only in Visibility, and matching that didn't help. So when the list
+-- didn't move (CurrentID unchanged since the last navigation; only navigation and our code
+-- change it, mouse hover doesn't) or landed on a hidden element (the game's buttons while one
+-- of our pages is open), we move on to the next visible element in that direction ourselves.
+local function AfterNavigation(list, dirValue)
+    local st = StateOf(list)
+    if not st then return end
+    local step = NavStep(dirValue)
+    local cur, id = SelectedElement(list)
+    if DEV_TOOLS then
+        Log("Pause menu: nav " .. tostring(navDirNames[dirValue] or dirValue) .. " (last " .. tostring(st.lastID)
+            .. ") -> " .. DescribeElements(list))
+    end
+    local stuck = (id == st.lastID) or not valid(cur) or not IsShown(cur)
+    if not (stuck and step) then
+        st.lastID = id
+        return
+    end
+    local elems = ListElements(list)
+    local n = #elems
+    if n == 0 then return end
+    local i = (type(id) == "number" and id >= 0) and id or (step > 0 and -1 or 0)
+    for _ = 1, n do
+        i = (i + step) % n
+        if IsShown(elems[i + 1]) then
+            if i ~= id then
+                SelectElement(list, elems[i + 1])
+                pcall(function() list.ScrollBox_6:ScrollWidgetIntoView(elems[i + 1], false, 0, 0.0) end)
+            end
+            st.lastID = i
+            return
+        end
+    end
+    st.lastID = id
+end
+
+-- Enter/A, step 1 (native pre-hook, before the game acts): if the selected element is ours or
+-- a hidden game button, hide it from the game's handler by setting CurrentID to -1.
+local function BeforeActionInput(menu)
+    local st = menuStates[Addr(menu)]
+    if not st then return end
+    local list = MenuList(menu)
+    if not list then return end
+    local elem, id = SelectedElement(list)
+    if not valid(elem) then return end
+    if IsCheatButton(elem) or not IsShown(elem) then
+        st.pendingAction = { id = id, elem = elem, list = list, fired = false }
+        pcall(function() list.CurrentID = -1 end)
+    end
+end
+
+-- Step 2 (list OnActiveItemAction, runs inside that call): the input was "activate the selection".
+local function OnActiveItemAction(list)
+    local st = StateOf(list)
+    if st and st.pendingAction then st.pendingAction.fired = true end
+end
+
+-- Step 3 (native post-hook): restore CurrentID and run our action if it was an activation.
+local function AfterActionInput(menu)
+    local st = menuStates[Addr(menu)]
+    local pa = st and st.pendingAction
+    if not pa then return end
+    st.pendingAction = nil
+    if valid(pa.list) then pcall(function() pa.list.CurrentID = pa.id end) end
+    if not pa.fired then return end
+    if IsCheatButton(pa.elem) then
+        OnCheatButtonClicked(pa.elem)
+    else
+        Log("Pause menu: blocked Enter on a hidden game menu button while a RoboCop Cheats page was open")
+    end
 end
 
 -- The menu classes load with the first pause menu, so this is retried from the main loop.
@@ -1877,45 +2170,79 @@ local function TryHookPauseMenu()
         return
     end
     pauseMenuHooked = true
+    local LIST = MENU_GLOBALS .. "WB_ScrolledList.WB_ScrolledList_C:"
+    local ELEM = MENU_GLOBALS .. "WB_ScrolledListElem.WB_ScrolledListElem_C:"
+    local function Hook(path, pre, post)
+        local ok, err = pcall(RegisterHook, path, pre, post)
+        if not ok then Log("Pause menu: can't hook " .. path .. ": " .. tostring(err)) end
+    end
+    local function Get(p)
+        local o = nil
+        pcall(function() o = p:get() end)
+        return o
+    end
     local events = {
-        { MENU_GLOBALS .. "WB_ScrolledList.WB_ScrolledList_C:Finalize", "list Finalize" },
+        { LIST .. "Finalize", "list Finalize" },
         { MENU_DIR .. "WB_InGameMenu.WB_InGameMenu_C:Construct", "Construct" },
         { MENU_DIR .. "WB_InGameMenu.WB_InGameMenu_C:OnFocusReceived", "OnFocusReceived" },
     }
     for _, h in ipairs(events) do
-        local ok, err = pcall(RegisterHook, h[1], function(self)
-            local o = nil
-            pcall(function() o = self:get() end)
-            local menu = OwningMenu(o)
+        Hook(h[1], function(self)
+            local menu = OwningMenu(Get(self))
             if menu then EnsureCheatMenuSoon(menu, h[2]) end
         end)
-        if not ok then Log("Pause menu: can't hook " .. h[1] .. ": " .. tostring(err)) end
     end
-    local clickFn = MENU_GLOBALS .. "WB_ScrolledListElem.WB_ScrolledListElem_C:OnMouseButtonUp"
-    local okC, errC = pcall(RegisterHook, clickFn, function(self)
-        local o = nil
-        pcall(function() o = self:get() end)
+    -- Mouse: click and hover on our buttons (blueprint hooks run after the function).
+    Hook(ELEM .. "OnMouseButtonUp", function(self)
+        local o = Get(self)
         if IsCheatButton(o) then OnCheatButtonClicked(o) end
     end)
-    if not okC then Log("Pause menu: can't hook " .. clickFn .. ": " .. tostring(errC)) end
+    Hook(ELEM .. "OnMouseEnter", function(self)
+        local o = Get(self)
+        if not IsCheatButton(o) then return end
+        local entry = cheatActions[Addr(o)]
+        local list = entry and MenuList(entry.state.menu)
+        if list then SelectElement(list, o) end
+    end)
+    -- Keyboard/controller.
+    Hook(LIST .. "HandleNavigationInput", function(self, direction)
+        local dir = nil
+        pcall(function() dir = direction:get() end)
+        local list = Get(self)
+        if valid(list) and dir ~= nil then AfterNavigation(list, dir) end
+    end)
+    Hook(LIST .. "OnActiveItemAction", function(self)
+        local list = Get(self)
+        if valid(list) then OnActiveItemAction(list) end
+    end)
+    Hook("/Script/Game.MenuWindowUserWidget:HandleActionInput",
+        function(self)
+            local menu = Get(self)
+            if valid(menu) then BeforeActionInput(menu) end
+        end,
+        function(self)
+            local menu = Get(self)
+            if valid(menu) then AfterActionInput(menu) end
+        end)
     -- Safety net: the menu's own click handler acts on child indices. It must never get one
-    -- of our buttons, or run while our page hides the game's buttons (e.g. keyboard Enter).
+    -- of our buttons, or run while our page hides the game's buttons.
     local bnd = MENU_DIR .. "WB_InGameMenu.WB_InGameMenu_C:"
         .. "BndEvt__WB_ScrolledList_K2Node_ComponentBoundEvent_1_OnElementAction__DelegateSignature"
-    local okB, errB = pcall(RegisterHook, bnd, function(self, element)
-        local e, menu = nil, nil
-        pcall(function() e = element:get() end)
-        pcall(function() menu = self:get() end)
+    Hook(bnd, function(self, element)
+        local e, menu = Get(element), Get(self)
         local st = menuStates[Addr(menu)]
-        if IsCheatButton(e) then
+        if not valid(e) then
+            if DEV_TOOLS then Log("Pause menu: the menu's click handler got no element (expected while Enter is redirected)") end
+        elseif IsCheatButton(e) then
             Log("WARNING: the pause menu's own click handler received one of our buttons")
         elseif st and st.page then
             Log("WARNING: a hidden game menu button was activated while a RoboCop Cheats page was open")
         end
     end)
-    if not okB then Log("Pause menu: can't hook " .. bnd .. ": " .. tostring(errB)) end
     Log("Pause menu hooks installed.")
     for _, m in ipairs(LiveInstances("WB_InGameMenu_C")) do EnsureCheatMenu(m, "hooks installed") end
+    -- Leftovers from before a hot reload can only be in menus that were open then.
+    staleButtons = {}
 end
 
 if DEV_TOOLS then

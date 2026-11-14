@@ -37,12 +37,12 @@ UNINSTALL
 
 
 MENU
-  In game: press Esc and click "RoboCop Cheats" at the bottom of the pause menu. It has
-  pages for Weapons, Ammo, Chips, Upgrade boards, Skill points and the DLC starting
-  weapon. Settings such as the ammo amount or a chip's value change each time you click
-  them. The result of each action shows at the top of the screen for a few seconds;
-  on the DLC starting weapon page, "> " marks the current choice. Back returns to
-  the previous page. Mouse only for now: don't use Enter or a controller on these pages.
+  In game: press Esc and pick "RoboCop Cheats" at the bottom of the pause menu (mouse, or
+  arrow keys + Enter). It has pages for Weapons, Ammo, Chips, Upgrade boards, Skill
+  points and the DLC starting weapon. Settings such as the ammo amount or a chip's value
+  change each time you pick them. The result of each action shows at the top of the
+  screen for a few seconds; on the DLC starting weapon page, "> " marks the current
+  choice. The "Back" entry returns to the previous page.
 
   Menu window (optional): Ctrl+O opens or closes the "UE4SS Debugging Tools" window with
   a "RoboCop Cheats" tab offering the same features. Close it again when you're done:
