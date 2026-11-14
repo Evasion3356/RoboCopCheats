@@ -25,6 +25,13 @@
       rcchipmap   (Ctrl+F6)        research: each chip's shape/rotation vs. what its widget shows
       rcchipinfo                   research: full chip/backpack/widget property dump (large)
       givechipraw <Shape> <rot> <boost> <tier>   raw AddPredefinedChip (tier 0-3)
+      rcmenudump                   research: pause menu widget tree + menu/button class API
+                                   (open the pause menu first)
+      rcmenuwatch                  research: toggle logging of every pause menu/button
+                                   blueprint function call (to see what a click runs)
+
+    Pause menu: "RoboCop Cheats" at the bottom of the game's pause menu opens the same
+    features as in-game pages (mouse only for now).
 
     Everything is logged with the [RoboCopCheats] prefix in ue4ss\UE4SS.log.
 ]]
@@ -96,19 +103,75 @@ local function Log(msg)
     print(TAG .. tostring(msg) .. "\n")
 end
 
-local function Notify(msg)
-    Log(msg)
-    -- Status line in the "RoboCop Cheats" GUI tab (provided by dlls/main.dll, if present).
-    if RC_UI_Status then pcall(RC_UI_Status, msg) end
-    -- Best effort on-screen text. May be invisible in a shipping build; harmless if so.
-    pcall(function()
-        local pc = UEHelpers.GetPlayerController()
-        if pc and pc:IsValid() then pc:ClientMessage(TAG .. msg, FName("None"), 5.0) end
-    end)
-end
+-- On-screen message for a few seconds, top centre, over the game and the pause menu.
+-- (ClientMessage shows nothing in this shipping build.) Uses the pause menu's own button
+-- widget for the game's font: its Construct shows its Text property, uppercased. Created
+-- click-through (HitTestInvisible) so it never blocks the menu.
+local TOAST_SECONDS = 3
+local TOAST_WIDGET = "/Game/UI/Menu/WB_InGameMenuButton02.WB_InGameMenuButton02_C"
+local toastWidget, toastSerial = nil, 0
+-- Set by the pause menu code below: returns the open pause menu, or nil. The pause menu sits
+-- above everything added with AddToViewport (a toast there only appeared once the menu was
+-- closed, 2026-11-13), so while it's open the toast goes onto the menu's own root canvas.
+local openPauseMenu = nil
 
 local function valid(o)
     return o ~= nil and o.IsValid ~= nil and o:IsValid()
+end
+
+local function ShowToast(msg)
+    local cls = StaticFindObject(TOAST_WIDGET)
+    local wbl = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
+    local pc = UEHelpers.GetPlayerController()
+    if not (valid(cls) and valid(wbl) and valid(pc)) then return end -- menu class not loaded yet
+    if valid(toastWidget) then pcall(function() toastWidget:RemoveFromParent() end) end
+    local menu = openPauseMenu and openPauseMenu() or nil
+    local canvas = nil
+    if menu then
+        pcall(function()
+            local root = menu.WidgetTree.RootWidget
+            if valid(root) and root:IsA("/Script/UMG.CanvasPanel") then canvas = root end
+        end)
+    end
+    local w = wbl:Create(menu or pc, cls, pc)
+    if not valid(w) then return end
+    w.Text = FText(msg)
+    w:SetVisibility(3) -- HitTestInvisible
+    local anchor = { Minimum = { X = 0.5, Y = 0.1 }, Maximum = { X = 0.5, Y = 0.1 } }
+    if canvas then
+        local slot = canvas:AddChildToCanvas(w)
+        slot:SetAnchors(anchor)
+        slot:SetAlignment({ X = 0.5, Y = 0.5 })
+        slot:SetAutoSize(true)
+        slot:SetZOrder(1000)
+    else
+        w:AddToViewport(10000)
+        w:SetAnchorsInViewport(anchor)
+        w:SetAlignmentInViewport({ X = 0.5, Y = 0.5 })
+    end
+    pcall(function() w:ShowElem() end)
+    toastWidget = w
+    toastSerial = toastSerial + 1
+    local mine = toastSerial
+    ExecuteWithDelay(TOAST_SECONDS * 1000, function()
+        ExecuteInGameThread(function()
+            if mine == toastSerial and valid(toastWidget) then
+                pcall(function() toastWidget:RemoveFromParent() end)
+                toastWidget = nil
+            end
+        end)
+    end)
+end
+
+local function Notify(msg)
+    msg = tostring(msg)
+    Log(msg)
+    -- Status line in the "RoboCop Cheats" GUI tab (provided by dlls/main.dll, if present).
+    if RC_UI_Status then pcall(RC_UI_Status, msg) end
+    ExecuteInGameThread(function()
+        local ok, err = pcall(ShowToast, msg)
+        if not ok then Log("On-screen message failed: " .. tostring(err)) end
+    end)
 end
 
 ----------------------------------------------------------------------------
@@ -601,8 +664,9 @@ local function GiveChip(mask, percent, look)
     local boost = PercentToBoost(percent)
     local tier = ClampTier(look - 1)
     if GiveChipRaw(shape, rot, boost, tier) then
-        Notify(string.format("Gave %d%% chip, arms %s (%s rotation %d, boost %d, look %d)",
-            BoostToPercent(boost), ArmsString(mask), shape, rot, boost, tier + 1))
+        Log(string.format("Chip details: arms %s = %s rotation %d, boost %d, look %d",
+            ArmsString(mask), shape, rot, boost, tier + 1))
+        Notify(string.format("Gave %d%% chip (%s)", BoostToPercent(boost), ArmsString(mask)))
     end
 end
 
@@ -1285,7 +1349,586 @@ RegisterConsoleCommandHandler("giveboard", function(_, Params, Ar)
     return true
 end)
 
+----------------------------------------------------------------------------
+-- Pause menu research (dev tools): rcmenudump / rcmenuwatch.
+-- Goal: add a "RoboCop Cheats" entry to the pause menu (/Game/UI/Menu/WB_InGameMenu).
+-- Open the pause menu (Esc) first so the widget and its classes exist.
+----------------------------------------------------------------------------
+local MENU_DIR = "/Game/UI/Menu/"
+local MENU_GLOBALS = "/Game/UI/Globals/"
+local MENU_CLASSES = { "WB_InGameMenu", "WB_InGameMenuButton", "WB_InGameMenuButton02" }
+local VIS_NAMES = { [0] = "Visible", [1] = "Collapsed", [2] = "Hidden",
+                    [3] = "HitTestInvisible", [4] = "SelfHitTestInvisible" }
+
+local function MenuClass(cn)
+    return StaticFindObject(MENU_DIR .. cn .. "." .. cn .. "_C")
+end
+
+local function WidgetLine(w)
+    local s = tostring(w)
+    pcall(function() s = w:GetClass():GetFName():ToString() .. " " .. w:GetFName():ToString() end)
+    pcall(function() s = s .. "  vis=" .. (VIS_NAMES[w.Visibility] or tostring(w.Visibility)) end)
+    pcall(function()
+        if w:IsA("/Script/UMG.TextBlock") or w:IsA("/Script/UMG.RichTextBlock") then
+            s = s .. '  TEXT="' .. w:GetText():ToString() .. '"'
+        end
+    end)
+    pcall(function()
+        local slot = w.Slot
+        if valid(slot) then s = s .. "  slot=" .. slot:GetClass():GetFName():ToString() end
+    end)
+    return s
+end
+
+-- Panels (incl. Border/Button/SizeBox) list children in Slots[i].Content; user widgets
+-- have their own WidgetTree.RootWidget. userDepth limits how many nested user widgets we open.
+local DumpWidgetTree
+DumpWidgetTree = function(w, indent, depth, userDepth)
+    if not valid(w) then return end
+    local pad = string.rep("  ", indent)
+    Log(pad .. WidgetLine(w))
+    if depth > 14 then Log(pad .. "  <depth limit>") return end
+    local isPanel, isUser = false, false
+    pcall(function() isPanel = w:IsA("/Script/UMG.PanelWidget") end)
+    pcall(function() isUser = w:IsA("/Script/UMG.UserWidget") end)
+    if isPanel then
+        pcall(function()
+            w.Slots:ForEach(function(_, e)
+                local slot = e:get()
+                if valid(slot) then DumpWidgetTree(slot.Content, indent + 1, depth + 1, userDepth) end
+            end)
+        end)
+    end
+    if isUser and userDepth > 0 then
+        pcall(function()
+            local root = w.WidgetTree.RootWidget
+            if valid(root) then
+                Log(pad .. "  {own tree}")
+                DumpWidgetTree(root, indent + 2, depth + 1, userDepth - 1)
+            end
+        end)
+    end
+end
+
+-- Functions (with signature and flags) and property names/types declared by cls and its
+-- parents, up to (not including) the classes in stopAt.
+local function DumpClassApi(cls, stopAt)
+    while valid(cls) do
+        if stopAt[cls:GetFName():ToString()] then break end
+        Log("  -- " .. cls:GetFullName())
+        cls:ForEachFunction(function(fn)
+            local ok, sig = pcall(function() return ParamsString(ReflectParams(fn)) end)
+            local flags = 0
+            pcall(function() flags = fn:GetFunctionFlags() end)
+            Log(string.format("    fn %s%s  flags=0x%X", fn:GetFName():ToString(), ok and sig or "(?)", flags))
+        end)
+        cls:ForEachProperty(function(prop)
+            local t = PropType(prop)
+            if t == "ObjectProperty" or t == "ClassProperty" then
+                pcall(function() t = t .. "<" .. prop:GetPropertyClass():GetFName():ToString() .. ">" end)
+            end
+            Log("    prop " .. prop:GetFName():ToString() .. " : " .. t)
+        end)
+        cls = cls:GetSuperStruct()
+    end
+end
+
+-- Our pause menu buttons, by object address (the menu rebuilds its buttons on every open,
+-- and there can be more than one WB_InGameMenu instance, so there can be several).
+local cheatButtons = {}
+
+local function IsCheatButton(o)
+    if not valid(o) then return false end
+    local ok, a = pcall(function() return o:GetAddress() end)
+    return ok and cheatButtons[a] ~= nil
+end
+
+-- The pause menu's buttons (WB_InGameMenuButton02 inside a WB_ScrolledList), excluding ours.
+-- Returns { {btn, parent, index}, ... }; logs them if verbose.
+local function MenuButtons(verbose)
+    local out = {}
+    for _, b in ipairs(LiveInstances("WB_InGameMenuButton02_C")) do
+        local parent, idx, text, id = nil, -1, "?", "?"
+        pcall(function() parent = b:GetParent() end)
+        if valid(parent) then pcall(function() idx = parent:GetChildIndex(b) end) end
+        pcall(function() text = b.Text:ToString() end)
+        pcall(function() id = tostring(b.ChildID) end)
+        local mine = IsCheatButton(b)
+        if verbose then
+            Log(string.format("  button %s  index=%s  ChildID=%s  text=\"%s\"%s  parent=%s",
+                b:GetFName():ToString(), tostring(idx), id, text, mine and "  (OURS)" or "",
+                valid(parent) and parent:GetFullName() or "none"))
+        end
+        if valid(parent) and not mine then table.insert(out, { b, parent, idx }) end
+    end
+    return out
+end
+
+local function MenuDump()
+    local stop = { UserWidget = true }
+    local menus = LiveInstances("WB_InGameMenu_C")
+    Log("=== WB_InGameMenu_C: " .. #menus .. " live ===")
+    for i, m in ipairs(menus) do
+        Log("--- menu " .. i .. ": " .. m:GetFullName())
+        pcall(function() Log("  IsInViewport=" .. tostring(m:IsInViewport())) end)
+        Log("  Widget tree:")
+        DumpWidgetTree(m, 2, 0, 2)
+        Log("  Property values:")
+        DumpObject(m, stop)
+    end
+    for _, cn in ipairs(MENU_CLASSES) do
+        local cls = MenuClass(cn)
+        Log("=== class " .. cn .. "_C: " .. (valid(cls) and "loaded" or "NOT loaded") .. " ===")
+        if valid(cls) then DumpClassApi(cls, stop) end
+    end
+    for _, cn in ipairs({ "WB_InGameMenuButton_C", "WB_InGameMenuButton02_C" }) do
+        local btns = LiveInstances(cn)
+        Log("=== " .. cn .. ": " .. #btns .. " live (values of the first) ===")
+        if btns[1] then DumpObject(btns[1], stop) end
+    end
+    -- The list that holds the menu buttons (2026-11-13: WB_InGameMenu.WB_ScrolledList).
+    local listCls = StaticFindObject(MENU_GLOBALS .. "WB_ScrolledList.WB_ScrolledList_C")
+    Log("=== class WB_ScrolledList_C: " .. (valid(listCls) and "loaded" or "NOT loaded") .. " ===")
+    if valid(listCls) then DumpClassApi(listCls, stop) end
+    for i, m in ipairs(menus) do
+        local list = nil
+        pcall(function() list = m.WB_ScrolledList end)
+        if valid(list) then
+            Log("--- menu " .. i .. " WB_ScrolledList tree:")
+            DumpWidgetTree(list, 2, 0, 1)
+            Log("--- menu " .. i .. " WB_ScrolledList values:")
+            DumpObject(list, stop)
+        end
+    end
+    MenuButtons(true)
+    if #menus == 0 then
+        Notify("No pause menu found. Open the pause menu (Esc), then run rcmenudump again.")
+    else
+        Notify("Pause menu info written to UE4SS.log")
+    end
+end
+
+-- Toggle: hook every function the menu/button blueprints declare and log the calls, to see
+-- which function runs when a menu button is clicked. Repeated calls are rate-limited.
+local menuWatchHooks = {}
+local function MenuWatch()
+    if #menuWatchHooks > 0 then
+        for _, h in ipairs(menuWatchHooks) do pcall(UnregisterHook, h[1], h[2], h[3]) end
+        menuWatchHooks = {}
+        Notify("Pause menu watch OFF")
+        return
+    end
+    local calls = {}
+    local classes = {}
+    for _, cn in ipairs(MENU_CLASSES) do table.insert(classes, { MENU_DIR, cn }) end
+    table.insert(classes, { MENU_GLOBALS, "WB_ScrolledList" })
+    table.insert(classes, { MENU_GLOBALS, "WB_ScrolledListElem" })
+    for _, dc in ipairs(classes) do
+        local dir, cn = dc[1], dc[2]
+        local cls = StaticFindObject(dir .. cn .. "." .. cn .. "_C")
+        if not valid(cls) then
+            Log("[menuwatch] " .. cn .. " not loaded (open the pause menu once first)")
+        else
+            local names = {}
+            cls:ForEachFunction(function(fn)
+                -- Skip pure delegate signatures (FUNC_Delegate 0x00100000); they never run.
+                -- BndEvt__...__DelegateSignature handlers are real events and are kept.
+                local flags = 0
+                pcall(function() flags = fn:GetFunctionFlags() end)
+                if (flags & 0x00100000) == 0 then table.insert(names, fn:GetFName():ToString()) end
+            end)
+            for _, fname in ipairs(names) do
+                local l = fname:lower()
+                if not (l:find("tick") or l:find("paint")) then
+                    local path = dir .. cn .. "." .. cn .. "_C:" .. fname
+                    local key = cn .. ":" .. fname
+                    local ok, pre, post = pcall(RegisterHook, path, function(self)
+                        local n = (calls[key] or 0) + 1
+                        calls[key] = n
+                        if n <= 5 or n % 100 == 0 then
+                            local who = "?"
+                            pcall(function() who = self:get():GetFName():ToString() end)
+                            Log(string.format("[menuwatch] %s  on %s  (#%d)", key, who, n))
+                        end
+                    end)
+                    if ok then
+                        table.insert(menuWatchHooks, { path, pre, post })
+                    else
+                        Log("[menuwatch] can't hook " .. path .. ": " .. tostring(pre))
+                    end
+                end
+            end
+        end
+    end
+    Notify("Pause menu watch ON: " .. #menuWatchHooks
+        .. " functions hooked. Use the pause menu, then run rcmenuwatch again to stop.")
+end
+
+----------------------------------------------------------------------------
+-- In-game pause menu: a "RoboCop Cheats" entry at the bottom of the pause menu. Clicking it
+-- swaps the menu's buttons for our own pages (mouse only for now).
+--
+-- How the pause menu works (rcmenudump / rcmenuwatch, 2026-11-13): every open creates a new
+-- WB_InGameMenu_C, which fills its WB_ScrolledList (ScrollBox_6) with WB_InGameMenuButton02
+-- buttons and calls the list's Finalize. A click reaches the menu as OnElementAction, and the
+-- menu picks the action from the clicked button's child index. Our buttons are added straight
+-- to the ScrollBox, never via WB_ScrolledList:AddItem, so that handler never sees them; their
+-- clicks are caught with a hook on WB_ScrolledListElem_C:OnMouseButtonUp. While one of our
+-- pages is open the game's buttons are collapsed, not removed, so their indices don't change.
+----------------------------------------------------------------------------
+local SLATE_COLLAPSED = 1
+local CHIP_MENU_PERCENTS = { 15, 23, 30, 38, 45, 75, 150, 300 }
+local AMMO_MENU_AMOUNTS = { 50, 100, 200, 500, 999 }
+local SKILL_MENU_AMOUNTS = { 1, 5, 10, 25, 100 }
+local CHIP_LOOKS = { "Normal", "Style 2 (ring)", "Style 3", "Style 4" } -- same names as dllmain.cpp
+
+local menuChipArms, menuChipPercent, menuChipLook = ARM_UP | ARM_DOWN, DEFAULT_CHIP_PERCENT, 1
+local menuAmmoAmount, menuSkillAmount = DEFAULT_AMMO_AMOUNT, DEFAULT_SKILL_POINTS
+
+local menuStates = {}   -- menu address -> { menu, page, buttons = {addr...}, gameVis = {addr -> visibility} }
+local cheatActions = {} -- our button's address -> { state, fn } (fn nil = status line, not clickable)
+local currentMenuState = nil
+
+local function Addr(o)
+    local ok, a = pcall(function() return o:GetAddress() end)
+    return ok and a or nil
+end
+
+local function Cycle(list, cur)
+    for i, v in ipairs(list) do
+        if v == cur then return list[i % #list + 1] end
+    end
+    return list[1]
+end
+
+local function BoardLabel(row)
+    local tier, rest = row:match("^Tier(%d+)_?(.*)$")
+    if not tier then return row end
+    return "Tier " .. tier .. (rest ~= "" and (" - " .. rest) or "")
+end
+
+-- For on-screen messages (see ShowToast): the pause menu we last clicked in, while the game
+-- is paused (the menu pauses it; after closing, the old menu object can linger until GC).
+openPauseMenu = function()
+    local st = currentMenuState
+    if not (st and valid(st.menu)) then return nil end
+    local paused = false
+    pcall(function() paused = UEHelpers.GetGameplayStatics():IsGamePaused(st.menu) end)
+    return paused and st.menu or nil
+end
+
+local function OpenPage(page)
+    if currentMenuState then currentMenuState.page = page end
+end
+
+local function BackTo(page) return { "Back", function() OpenPage(page) end } end
+local function OnOff(b) return b and "On" or "Off" end
+
+local PAGES = {}
+
+PAGES.root = function()
+    return {
+        { "Weapons",             function() OpenPage("weapons") end },
+        { "Ammo",                function() OpenPage("ammo") end },
+        { "Chips",               function() OpenPage("chips") end },
+        { "Upgrade boards",      function() OpenPage("boards") end },
+        { "Skill points",        function() OpenPage("skills") end },
+        { "DLC starting weapon", function() OpenPage("dlc") end },
+        BackTo(nil),
+    }
+end
+
+PAGES.weapons = function()
+    local t = {}
+    for _, w in ipairs(WEAPONS) do table.insert(t, { w[1], function() GiveWeapon(w) end }) end
+    table.insert(t, BackTo("root"))
+    return t
+end
+
+PAGES.ammo = function()
+    local t = { { "Amount: " .. menuAmmoAmount, function() menuAmmoAmount = Cycle(AMMO_MENU_AMOUNTS, menuAmmoAmount) end } }
+    for _, a in ipairs(AMMO) do table.insert(t, { a[1], function() GiveAmmo(a[2], menuAmmoAmount) end }) end
+    table.insert(t, BackTo("root"))
+    return t
+end
+
+PAGES.chips = function()
+    local t = {}
+    for _, arm in ipairs(ARM_NAMES) do
+        local bit, name = arm[1], arm[2]
+        table.insert(t, { name .. " arm: " .. OnOff((menuChipArms & bit) ~= 0),
+                          function() menuChipArms = menuChipArms ~ bit end })
+    end
+    table.insert(t, { "Value: " .. BoostToPercent(PercentToBoost(menuChipPercent)) .. "%",
+                      function() menuChipPercent = Cycle(CHIP_MENU_PERCENTS, menuChipPercent) end })
+    table.insert(t, { "Look: " .. CHIP_LOOKS[menuChipLook],
+                      function() menuChipLook = menuChipLook % #CHIP_LOOKS + 1 end })
+    table.insert(t, { "Give chip", function()
+        if menuChipArms == 0 then Notify("Turn on at least one arm first.") return end
+        GiveChip(menuChipArms, menuChipPercent, menuChipLook)
+    end })
+    table.insert(t, BackTo("root"))
+    return t
+end
+
+PAGES.boards = function()
+    local t = {}
+    local rows = GetBoardRows()
+    if #rows == 0 then table.insert(t, { "Boards appear once you're in a level", nil }) end
+    for _, r in ipairs(rows) do table.insert(t, { BoardLabel(r), function() GiveBoard(r) end }) end
+    table.insert(t, BackTo("root"))
+    return t
+end
+
+PAGES.skills = function()
+    return {
+        { "Amount: " .. menuSkillAmount, function() menuSkillAmount = Cycle(SKILL_MENU_AMOUNTS, menuSkillAmount) end },
+        { "Add skill points",            function() GiveSkillPoints(menuSkillAmount) end },
+        { "Remove unspent points",       function() ClearSkillPoints() end },
+        BackTo("root"),
+    }
+end
+
+PAGES.dlc = function()
+    local function Mark(on, label) return (on and "> " or "") .. label end
+    local t = { { Mark(dlcWeapon == nil, "Game default (OCP Combat Shotgun)"), function() SetDlcWeapon("default") end } }
+    for _, w in ipairs(WEAPONS) do
+        if w[2] ~= DLC_DEFAULT_ASSET then
+            table.insert(t, { Mark(dlcWeapon == w[2], w[1]), function() SetDlcWeapon(w[2]) end })
+        end
+    end
+    table.insert(t, BackTo("root"))
+    return t
+end
+
+local function MenuBox(menu)
+    local box = nil
+    pcall(function() box = menu.WB_ScrolledList.ScrollBox_6 end)
+    return valid(box) and box or nil
+end
+
+local function ForEachChild(panel, fn)
+    local n = 0
+    pcall(function() n = panel:GetChildrenCount() end)
+    local kids = {}
+    for i = 0, n - 1 do
+        local c = nil
+        pcall(function() c = panel:GetChildAt(i) end)
+        if valid(c) then table.insert(kids, c) end
+    end
+    for _, c in ipairs(kids) do fn(c) end
+end
+
+local function AddMenuButton(state, box, sample, text, fn)
+    local wbl = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
+    local cls = MenuClass("WB_InGameMenuButton02")
+    if not (valid(wbl) and valid(cls)) then Log("Pause menu: WidgetBlueprintLibrary or button class not found") return end
+    local okC, btn = pcall(function() return wbl:Create(state.menu, cls, UEHelpers.GetPlayerController()) end)
+    if not okC or not valid(btn) then Log("Pause menu: creating a button failed: " .. tostring(btn)) return end
+    local a = btn:GetAddress()
+    cheatButtons[a] = btn
+    cheatActions[a] = { state = state, fn = fn }
+    table.insert(state.buttons, a)
+    pcall(function() btn.Text = FText(text) end)
+    local okA, slot = pcall(function() return box:AddChild(btn) end)
+    if not okA then Log("Pause menu: AddChild failed: " .. tostring(slot)) return end
+    pcall(function()
+        local src = sample.Slot
+        for _, f in ipairs({ "Padding", "HorizontalAlignment", "VerticalAlignment" }) do
+            pcall(function() slot["Set" .. f](slot, src[f]) end)
+        end
+    end)
+    -- The list reveals its own buttons one by one (ShowDelay / ShowElem); ours aren't in its
+    -- Elements array, so without this they stay invisible (seen 2026-11-13).
+    pcall(function() btn:ShowElem() end)
+end
+
+local function ClearOurButtons(state)
+    for _, a in ipairs(state.buttons) do
+        local b = cheatButtons[a]
+        if valid(b) then pcall(function() b:RemoveFromParent() end) end
+        cheatButtons[a] = nil
+        cheatActions[a] = nil
+    end
+    state.buttons = {}
+end
+
+-- Redraw a menu's list: the game's buttons + "RoboCop Cheats" (page nil), or one of our pages.
+local function RenderMenu(state)
+    if not valid(state.menu) then return end
+    local box = MenuBox(state.menu)
+    if not box then return end
+    -- Keep the scroll position when redrawing the same page (e.g. after picking a DLC
+    -- weapon near the bottom); a different page starts at the top.
+    local offset = 0
+    if state.renderedPage == state.page then pcall(function() offset = box:GetScrollOffset() end) end
+    ClearOurButtons(state)
+    local sample = nil
+    ForEachChild(box, function(c)
+        if IsCheatButton(c) then return end
+        sample = sample or c
+        local a = Addr(c)
+        if state.page then
+            if state.gameVis[a] == nil then
+                local v = nil
+                pcall(function() v = c.Visibility end)
+                state.gameVis[a] = v
+            end
+            pcall(function() c:SetVisibility(SLATE_COLLAPSED) end)
+        elseif state.gameVis[a] ~= nil then
+            local v = state.gameVis[a]
+            pcall(function() c:SetVisibility(v) end)
+            state.gameVis[a] = nil
+        end
+    end)
+    if not sample then return end
+    local entries
+    if state.page then
+        entries = PAGES[state.page]()
+    else
+        entries = { { "RoboCop Cheats", function() OpenPage("root") end } }
+    end
+    for _, e in ipairs(entries) do AddMenuButton(state, box, sample, e[1], e[2]) end
+    state.renderedPage = state.page
+    pcall(function() box:SetScrollOffset(offset) end)
+    if offset > 0 then
+        -- Again once the new buttons have been laid out, in case the first call was
+        -- clamped against the old content height.
+        ExecuteWithDelay(50, function()
+            ExecuteInGameThread(function()
+                if valid(box) then pcall(function() box:SetScrollOffset(offset) end) end
+            end)
+        end)
+    end
+end
+
+-- Forget menus that are gone, so stale button addresses can't match new objects.
+local function PruneMenus()
+    for ma, st in pairs(menuStates) do
+        if not valid(st.menu) then
+            for _, a in ipairs(st.buttons) do
+                cheatButtons[a] = nil
+                cheatActions[a] = nil
+            end
+            menuStates[ma] = nil
+        end
+    end
+end
+
+local function EnsureCheatMenu(menu, why)
+    if not valid(menu) then return end
+    PruneMenus()
+    local ma = Addr(menu)
+    if not ma then return end
+    local st = menuStates[ma]
+    if not st then
+        st = { menu = menu, page = nil, buttons = {}, gameVis = {} }
+        menuStates[ma] = st
+    end
+    local box = MenuBox(menu)
+    if not box then return end
+    local has = false
+    ForEachChild(box, function(c) if IsCheatButton(c) then has = true end end)
+    if not has then
+        RenderMenu(st)
+        Log("Pause menu: added RoboCop Cheats to " .. menu:GetFName():ToString() .. " (" .. why .. ")")
+    end
+end
+
+local function EnsureCheatMenuSoon(menu, why)
+    -- Let the menu finish building its list first.
+    ExecuteWithDelay(150, function()
+        ExecuteInGameThread(function() EnsureCheatMenu(menu, why) end)
+    end)
+end
+
+local function OnCheatButtonClicked(btn)
+    local entry = cheatActions[Addr(btn)]
+    if not entry or not entry.fn then return end
+    -- Deferred: the action usually redraws the list, which removes the clicked button.
+    ExecuteInGameThread(function()
+        currentMenuState = entry.state
+        local ok, err = pcall(entry.fn)
+        if not ok then Notify("Error: " .. tostring(err)) end
+        RenderMenu(entry.state)
+    end)
+end
+
+-- The WB_InGameMenu that owns a widget inside it (walks the outer chain).
+local function OwningMenu(obj)
+    local o = obj
+    for _ = 1, 6 do
+        if not valid(o) then return nil end
+        local ok, isMenu = pcall(function() return o:GetClass():GetFName():ToString() == "WB_InGameMenu_C" end)
+        if ok and isMenu then return o end
+        local okO, outer = pcall(function() return o:GetOuter() end)
+        o = okO and outer or nil
+    end
+    return nil
+end
+
+-- The menu classes load with the first pause menu, so this is retried from the main loop.
+local pauseMenuHooked = false
+local function TryHookPauseMenu()
+    if pauseMenuHooked then return end
+    if not (valid(MenuClass("WB_InGameMenu"))
+            and valid(StaticFindObject(MENU_GLOBALS .. "WB_ScrolledList.WB_ScrolledList_C"))
+            and valid(StaticFindObject(MENU_GLOBALS .. "WB_ScrolledListElem.WB_ScrolledListElem_C"))) then
+        return
+    end
+    pauseMenuHooked = true
+    local events = {
+        { MENU_GLOBALS .. "WB_ScrolledList.WB_ScrolledList_C:Finalize", "list Finalize" },
+        { MENU_DIR .. "WB_InGameMenu.WB_InGameMenu_C:Construct", "Construct" },
+        { MENU_DIR .. "WB_InGameMenu.WB_InGameMenu_C:OnFocusReceived", "OnFocusReceived" },
+    }
+    for _, h in ipairs(events) do
+        local ok, err = pcall(RegisterHook, h[1], function(self)
+            local o = nil
+            pcall(function() o = self:get() end)
+            local menu = OwningMenu(o)
+            if menu then EnsureCheatMenuSoon(menu, h[2]) end
+        end)
+        if not ok then Log("Pause menu: can't hook " .. h[1] .. ": " .. tostring(err)) end
+    end
+    local clickFn = MENU_GLOBALS .. "WB_ScrolledListElem.WB_ScrolledListElem_C:OnMouseButtonUp"
+    local okC, errC = pcall(RegisterHook, clickFn, function(self)
+        local o = nil
+        pcall(function() o = self:get() end)
+        if IsCheatButton(o) then OnCheatButtonClicked(o) end
+    end)
+    if not okC then Log("Pause menu: can't hook " .. clickFn .. ": " .. tostring(errC)) end
+    -- Safety net: the menu's own click handler acts on child indices. It must never get one
+    -- of our buttons, or run while our page hides the game's buttons (e.g. keyboard Enter).
+    local bnd = MENU_DIR .. "WB_InGameMenu.WB_InGameMenu_C:"
+        .. "BndEvt__WB_ScrolledList_K2Node_ComponentBoundEvent_1_OnElementAction__DelegateSignature"
+    local okB, errB = pcall(RegisterHook, bnd, function(self, element)
+        local e, menu = nil, nil
+        pcall(function() e = element:get() end)
+        pcall(function() menu = self:get() end)
+        local st = menuStates[Addr(menu)]
+        if IsCheatButton(e) then
+            Log("WARNING: the pause menu's own click handler received one of our buttons")
+        elseif st and st.page then
+            Log("WARNING: a hidden game menu button was activated while a RoboCop Cheats page was open")
+        end
+    end)
+    if not okB then Log("Pause menu: can't hook " .. bnd .. ": " .. tostring(errB)) end
+    Log("Pause menu hooks installed.")
+    for _, m in ipairs(LiveInstances("WB_InGameMenu_C")) do EnsureCheatMenu(m, "hooks installed") end
+end
+
 if DEV_TOOLS then
+    RegisterConsoleCommandHandler("rcmenudump", function()
+        ExecuteInGameThread(MenuDump)
+        return true
+    end)
+
+    RegisterConsoleCommandHandler("rcmenuwatch", function()
+        ExecuteInGameThread(MenuWatch)
+        return true
+    end)
+
     RegisterConsoleCommandHandler("rcdump", function()
         ExecuteInGameThread(DumpApi)
         return true
@@ -1376,6 +2019,8 @@ LoopInGameThreadWithDelay(100, function()
         dlcBackpackRetry = 5
         local bp = GetBackpack(true)
         if bp then ApplyDlcWeapon(bp) end
+        -- Pause menu entry: hook the menu classes once they're loaded.
+        TryHookPauseMenu()
     end
     if not RC_UI_Pop then return end
     if not uiConnected then
@@ -1409,4 +2054,4 @@ LoopInGameThreadWithDelay(100, function()
 end)
 
 Log("v" .. MOD_VERSION .. " loaded. F7/F8 select, F9 give. Console: givelist, give, giveammo, givechip, boardlist, giveboard, dlcweapon, giveskill, clearskill."
-    .. (DEV_TOOLS and " Dev tools: F6/rcdump, Ctrl+F6/rcchipmap, rcchipinfo, rcchipdump, givechipraw." or ""))
+    .. (DEV_TOOLS and " Dev tools: F6/rcdump, Ctrl+F6/rcchipmap, rcchipinfo, rcchipdump, givechipraw, rcmenudump, rcmenuwatch." or ""))

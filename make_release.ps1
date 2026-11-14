@@ -40,7 +40,7 @@ New-Zip "RoboCopCheats-$ver-full" {
     $text = [IO.File]::ReadAllText($ini)
     $new  = [regex]::Replace($text, '(?m)^ConsoleEnabled = 1', 'ConsoleEnabled = 0')
     if ($new -eq $text -and $text -notmatch '(?m)^ConsoleEnabled = 0') { throw 'ConsoleEnabled line not found' }
-    foreach ($k in 'GuiConsoleEnabled = 1', 'GuiConsoleVisible = 1', 'GraphicsAPI = dx11') {
+    foreach ($k in 'GuiConsoleEnabled = 1', 'GuiConsoleVisible = 0', 'GraphicsAPI = dx11') {
         if ($new -notmatch "(?m)^$k") { throw "UE4SS-settings.ini must have '$k'" }
     }
     [IO.File]::WriteAllText($ini, $new)   # keeps the original bytes/line endings otherwise

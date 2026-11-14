@@ -26,8 +26,9 @@ INSTALL (mod-only download - you already have UE4SS)
   1. Extract into the game folder as above (adds ue4ss\Mods\RoboCopCheats\).
   2. In ue4ss\UE4SS-settings.ini set:
        GuiConsoleEnabled = 1
-       GuiConsoleVisible = 1
+       GuiConsoleVisible = 0
        GraphicsAPI = dx11
+  (GuiConsoleEnabled = 1 is only needed for the optional menu window, see MENU.)
   The mod enables itself through its enabled.txt, so mods.txt doesn't need editing.
 
 UNINSTALL
@@ -36,8 +37,17 @@ UNINSTALL
 
 
 MENU
-  The "UE4SS Debugging Tools" window opens with the game. Ctrl+O shows or hides it.
-  Open the "RoboCop Cheats" tab. Borderless or windowed mode makes switching easiest.
+  In game: press Esc and click "RoboCop Cheats" at the bottom of the pause menu. It has
+  pages for Weapons, Ammo, Chips, Upgrade boards, Skill points and the DLC starting
+  weapon. Settings such as the ammo amount or a chip's value change each time you click
+  them. The result of each action shows at the top of the screen for a few seconds;
+  on the DLC starting weapon page, "> " marks the current choice. Back returns to
+  the previous page. Mouse only for now: don't use Enter or a controller on these pages.
+
+  Menu window (optional): Ctrl+O opens or closes the "UE4SS Debugging Tools" window with
+  a "RoboCop Cheats" tab offering the same features. Close it again when you're done:
+  while it is open, the Steam and NVIDIA overlays don't work.
+  The pages below describe the window; the pause menu works the same way.
 
   Weapons & Ammo
     - Click a weapon to receive it with full ammo. Like a real pickup, it replaces the
@@ -85,8 +95,9 @@ GOOD TO KNOW
   - After a game update the mod may need an update too.
 
 TROUBLESHOOTING
-  - No menu window: check that dwmapi.dll is next to RoboCop-Win64-Shipping.exe and that
-    GuiConsoleEnabled = 1 is set in ue4ss\UE4SS-settings.ini.
+  - No "RoboCop Cheats" in the pause menu and Ctrl+O does nothing: check that dwmapi.dll
+    is next to RoboCop-Win64-Shipping.exe. For the window, GuiConsoleEnabled = 1 must be
+    set in ue4ss\UE4SS-settings.ini.
   - Something doesn't work: set ConsoleEnabled = 1 in UE4SS-settings.ini to get a log
     window, or send ue4ss\UE4SS.log. The mod's lines start with [RoboCopCheats].
   - The game crashes at start after an update: remove dwmapi.dll and wait for a mod or
