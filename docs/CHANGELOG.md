@@ -6,6 +6,8 @@ workflow takes each version's notes from its `## [X.Y]` section.
 
 ## [Unreleased]
 
+## [1.1] - 2026-11-13
+
 ### Added
 - "RoboCop Cheats" entry in the game's own pause menu, with the same pages as
   the Ctrl+O window. Works with the mouse and with the arrow keys + Enter.

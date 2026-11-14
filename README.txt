@@ -1,4 +1,4 @@
-RoboCop Cheats v1.0 - for RoboCop: Rogue City (Steam)
+RoboCop Cheats v1.1 - for RoboCop: Rogue City (Steam)
 =====================================================
 
 A clickable in-game menu (plus hotkeys and console commands) to give yourself:
