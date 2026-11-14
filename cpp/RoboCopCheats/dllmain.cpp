@@ -9,7 +9,8 @@
 //   RC_UI_AddAmmo(display, asset)       add an ammo button
 //   RC_UI_AddBoard(display, row)        add an upgrade board button (DT_WeaponUpgradeBoards row)
 //   RC_UI_Pop() -> string|nil           next queued request: "give <asset>" / "ammo <asset> <amount>" /
-//                                       "chip <arms mask> <percent> <look 1-4>" / "board <row>"
+//                                       "chip <arms mask> <percent> <look 1-4>" / "board <row>" /
+//                                       "skill <amount>" / "skillclear"
 //   RC_UI_Status(msg)                   status line shown at the top of the tab
 //   RC_UI_SetDlcWeapon(asset)           current DLC starting weapon ("default" = game's own)
 //                                       (combo sends "dlcweapon <asset|default>")
@@ -423,6 +424,28 @@ namespace
         ImGui::EndChild();
     }
 
+    // Max per click; must match MAX_SKILL_POINTS_PER_GIVE in main.lua (Lua clamps too).
+    constexpr int MaxSkillPointsPerGive = 100;
+
+    void draw_skills_page()
+    {
+        static int amount = 1;
+
+        ImGui::SeparatorText("Skill points");
+        ImGui::TextWrapped("Adds unspent skill points. Spend them on the Skills screen as usual.");
+        ImGui::SetNextItemWidth(120.0f);
+        if (ImGui::InputInt("Amount##skill", &amount, 1, 5)) amount = std::clamp(amount, 1, MaxSkillPointsPerGive);
+        if (ImGui::Button("Add skill points", ImVec2(160.0f, 0))) push_request(std::format("skill {}", amount));
+        ImGui::TextDisabled("The status line above shows how many you now have unspent.");
+        ImGui::Spacing();
+        if (ImGui::Button("Remove unspent points", ImVec2(160.0f, 0))) push_request("skillclear");
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetTooltip("Sets your unspent skill points to 0. Handy once every skill is maxed:\n"
+                              "leveling up keeps giving points you can't spend, and the game keeps reminding you.");
+        }
+    }
+
     void draw_cheats_tab()
     {
         if (!bind_ue4ss_imgui()) return;
@@ -462,6 +485,11 @@ namespace
             draw_chips_page(boards);
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("Skills"))
+        {
+            draw_skills_page();
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
     }
 } // namespace
@@ -473,7 +501,7 @@ class RoboCopCheatsMod : public CppUserModBase
     {
         ModName = STR("RoboCopCheats");
         ModVersion = STR("1.0");
-        ModDescription = STR("Cheats tab for RoboCop: Rogue City: weapons, ammo, DLC starting weapon, Auto-9 chips, upgrade boards");
+        ModDescription = STR("Cheats tab for RoboCop: Rogue City: weapons, ammo, DLC starting weapon, Auto-9 chips, upgrade boards, skill points");
         ModAuthors = STR("Evasion3356");
 
         register_tab(STR("RoboCop Cheats"), [](CppUserModBase*) { draw_cheats_tab(); });

@@ -1,5 +1,5 @@
 --[[
-    RoboCop Cheats: weapons, ammo, Auto-9 chips and upgrade boards for RoboCop: Rogue City
+    RoboCop Cheats: weapons, ammo, Auto-9 chips, upgrade boards and skill points for RoboCop: Rogue City
     (UE4SS Lua mod; the GUI tab is drawn by dlls/main.dll)
 
     Hotkeys (in game):
@@ -16,6 +16,8 @@
       giveboard <index|row>        give an upgrade board
       dlcweapon <index|name|default>  weapon the Deluxe/DLC edition starts levels with
                                    (instead of the OCP Combat Shotgun); saved to dlc_weapon.txt
+      giveskill [amount]           add unspent skill points (default 1, max 100 per call)
+      clearskill                   remove all unspent skill points
 
     Developer tools (only when DEV_TOOLS = true below):
       F6 / rcdump                  dump the Backpack API + chip/board info to UE4SS.log
@@ -1023,6 +1025,133 @@ local function ChipMap()
     Notify("Chip map written to UE4SS.log (" .. #lines .. " lines)")
 end
 
+----------------------------------------------------------------------------
+-- Skill points. Native names from the game exe (2026-11-13):
+--   * the cheat manager has AddSkillPoints (next to AddWeapon, UnlockAllSkills...);
+--   * a progression class has FreeSkillPoints (unspent points), SetSkillPoints,
+--     AddSkillPoint and ConsumeSkillPoint (next to ExpLevel, OnLevelUp, WeaponBoards).
+-- Signatures and the progression class name are read by reflection at runtime, and a
+-- call is only made when it takes exactly one int. Primary path is the game's own cheat;
+-- FreeSkillPoints before/after verifies it, and SetSkillPoints(current + n) is the
+-- fallback (no CheatManager, or the cheat changed nothing).
+----------------------------------------------------------------------------
+local DEFAULT_SKILL_POINTS = 1
+local MAX_SKILL_POINTS_PER_GIVE = 100
+local SKILL_SET_FUNC = "SetSkillPoints"
+local SKILL_FREE_PROP = "FreeSkillPoints"
+
+local function SingleIntParam(params)
+    if not params then return false end
+    local ins = {}
+    for _, p in ipairs(params) do
+        if p.name:lower() ~= "returnvalue" and not p.out then table.insert(ins, p) end
+    end
+    return #ins == 1 and ins[1].type == "IntProperty"
+end
+
+local progressionClass = nil -- native class owning SetSkillPoints, found once by reflection
+local function GetProgression()
+    if not progressionClass then
+        local fns = FindFunctionsNamed({ [SKILL_SET_FUNC] = true })
+        for _, fn in ipairs(fns) do Log("Found " .. fn:GetFullName() .. ParamsString(ReflectParams(fn))) end
+        if #fns ~= 1 then Log(#fns .. " " .. SKILL_SET_FUNC .. " functions in memory; expected 1") return nil end
+        progressionClass = fns[1]:GetOuter():GetFName():ToString()
+    end
+    -- Exactly one live instance, or none at all: never write to a stale one left over
+    -- from a previous level (same rule as GetBackpack).
+    local live = LiveInstances(progressionClass)
+    if #live ~= 1 then
+        Log(string.format("%d live %s object(s); not using any", #live, progressionClass))
+        for _, o in ipairs(live) do Log("    " .. o:GetFullName()) end
+        return nil
+    end
+    return live[1]
+end
+
+local function ReadFreeSkillPoints(prog)
+    if not valid(prog) then return nil end
+    local ok, v = pcall(function() return prog[SKILL_FREE_PROP] end)
+    return (ok and type(v) == "number") and v or nil
+end
+
+local function GiveSkillPoints(n)
+    n = math.max(1, math.min(MAX_SKILL_POINTS_PER_GIVE, math.floor(tonumber(n) or DEFAULT_SKILL_POINTS)))
+    local prog = GetProgression()
+    local before = ReadFreeSkillPoints(prog)
+    Log(string.format("Skill points: progression=%s %s=%s",
+        valid(prog) and prog:GetFullName() or "none", SKILL_FREE_PROP, tostring(before)))
+
+    -- 1. The game's own cheat command.
+    local done = false
+    local cm = nil
+    pcall(function() cm = UEHelpers.GetPlayerController().CheatManager end)
+    if valid(cm) then
+        local params = GetFunctionParams(cm, "AddSkillPoints")
+        if SingleIntParam(params) then
+            Log("Calling " .. cm:GetFullName() .. ":" .. SignatureString("AddSkillPoints", params) .. " with " .. n)
+            local ok, err = pcall(function() cm:AddSkillPoints(n) end)
+            if ok then
+                done = true
+                local after = ReadFreeSkillPoints(prog)
+                if before and after == before then
+                    Log("AddSkillPoints didn't change " .. SKILL_FREE_PROP .. "; trying " .. SKILL_SET_FUNC)
+                    done = false
+                end
+            else
+                Log("AddSkillPoints errored: " .. tostring(err))
+            end
+        else
+            Log("CheatManager " .. SignatureString("AddSkillPoints", params) .. ": not a single int, skipping")
+        end
+    else
+        Log("No CheatManager (is CheatManagerEnablerMod enabled?); trying " .. SKILL_SET_FUNC)
+    end
+
+    -- 2. Fallback: set the unspent count directly.
+    if not done then
+        if not (prog and before) then
+            Notify("Couldn't add skill points: player progression not found (load into a level first).")
+            return
+        end
+        local params = GetFunctionParams(prog, SKILL_SET_FUNC)
+        if not SingleIntParam(params) then
+            Notify("Couldn't add skill points: " .. SignatureString(SKILL_SET_FUNC, params) .. " is not a single int.")
+            return
+        end
+        Log("Calling " .. prog:GetFullName() .. ":" .. SignatureString(SKILL_SET_FUNC, params) .. " with " .. (before + n))
+        local ok, err = pcall(function() prog[SKILL_SET_FUNC](prog, before + n) end)
+        if not ok then Notify(SKILL_SET_FUNC .. " failed: " .. tostring(err)) return end
+    end
+
+    local after = ReadFreeSkillPoints(prog)
+    Notify(string.format("Added %d skill point%s%s", n, n == 1 and "" or "s",
+        after and string.format(" (%d unspent)", after) or ""))
+end
+
+-- Removes all unspent skill points (once every skill is maxed, new levels keep granting
+-- points the game can't spend and keeps reminding you about). Verified signature from the
+-- log, 2026-11-13: PlayerProgressionManager:SetSkillPoints(int SkillPoints).
+local function ClearSkillPoints()
+    local prog = GetProgression()
+    local before = ReadFreeSkillPoints(prog)
+    if not (prog and before) then
+        Notify("Couldn't remove skill points: player progression not found (load into a level first).")
+        return
+    end
+    if before == 0 then Notify("No unspent skill points to remove.") return end
+    local params = GetFunctionParams(prog, SKILL_SET_FUNC)
+    if not SingleIntParam(params) then
+        Notify("Couldn't remove skill points: " .. SignatureString(SKILL_SET_FUNC, params) .. " is not a single int.")
+        return
+    end
+    Log("Calling " .. prog:GetFullName() .. ":" .. SignatureString(SKILL_SET_FUNC, params) .. " with 0")
+    local ok, err = pcall(function() prog[SKILL_SET_FUNC](prog, 0) end)
+    if not ok then Notify(SKILL_SET_FUNC .. " failed: " .. tostring(err)) return end
+    local after = ReadFreeSkillPoints(prog)
+    Notify(after == 0 and string.format("Removed %d unspent skill point%s", before, before == 1 and "" or "s")
+                     or ("Tried to remove skill points, but " .. tostring(after) .. " are still unspent"))
+end
+
 local function FindWeapon(query)
     local idx = tonumber(query)
     if idx and WEAPONS[idx] then return WEAPONS[idx] end
@@ -1124,6 +1253,17 @@ RegisterConsoleCommandHandler("dlcweapon", function(_, Params, Ar)
     return true
 end)
 
+RegisterConsoleCommandHandler("giveskill", function(_, Params, Ar)
+    local n = tonumber(Params[1] or "") or DEFAULT_SKILL_POINTS
+    ExecuteInGameThread(function() GiveSkillPoints(n) end)
+    return true
+end)
+
+RegisterConsoleCommandHandler("clearskill", function()
+    ExecuteInGameThread(ClearSkillPoints)
+    return true
+end)
+
 RegisterConsoleCommandHandler("boardlist", function(_, _, Ar)
     ExecuteInGameThread(function()
         for i, r in ipairs(GetBoardRows()) do Out(Ar, string.format("%2d  %s", i, r)) end
@@ -1211,6 +1351,11 @@ local function HandleUiRequest(req)
         GiveBoard(asset)
     elseif kind == "dlcweapon" then
         SetDlcWeapon(asset)
+    elseif kind == "skill" then
+        -- "skill <amount>"
+        GiveSkillPoints(tonumber(words[2]) or DEFAULT_SKILL_POINTS)
+    elseif kind == "skillclear" then
+        ClearSkillPoints()
     elseif kind == "give" then
         for _, w in ipairs(WEAPONS) do
             if w[2] == asset then GiveWeapon(w) return end
@@ -1263,5 +1408,5 @@ LoopInGameThreadWithDelay(100, function()
     end
 end)
 
-Log("v" .. MOD_VERSION .. " loaded. F7/F8 select, F9 give. Console: givelist, give, giveammo, givechip, boardlist, giveboard, dlcweapon."
+Log("v" .. MOD_VERSION .. " loaded. F7/F8 select, F9 give. Console: givelist, give, giveammo, givechip, boardlist, giveboard, dlcweapon, giveskill, clearskill."
     .. (DEV_TOOLS and " Dev tools: F6/rcdump, Ctrl+F6/rcchipmap, rcchipinfo, rcchipdump, givechipraw." or ""))

@@ -7,6 +7,7 @@ A clickable in-game menu (plus hotkeys and console commands) to give yourself:
   - Auto-9 chips: choose connections, value % and look
   - Auto-9 upgrade boards
   - a different DLC starting weapon (Deluxe edition) instead of the OCP Combat Shotgun
+  - skill points
 
 Built on RE-UE4SS v4.0.0. Tested on the Steam version, build 22996396.
 
@@ -53,6 +54,11 @@ MENU
       click Give chip.
     - Upgrade boards: click a board to add it. The list appears once you are in a level.
 
+  Skills
+    - Set the amount and click Add skill points, then spend them on the Skills screen.
+    - Remove unspent points: sets unspent points to 0. Useful once every skill is maxed,
+      when leveling up keeps giving points you can't spend (and the game keeps reminding you).
+
 
 HOTKEYS AND CONSOLE (once you are in a level)
   F7 / F8   previous / next weapon      F9   give the selected weapon
@@ -64,6 +70,8 @@ HOTKEYS AND CONSOLE (once you are in a level)
     givechip <arms> [percent] [look]  arms = letters U R D L, e.g.  givechip UR 45
     boardlist / giveboard <number|name>
     dlcweapon <number|name|default>   e.g.  dlcweapon M60
+    giveskill [amount]                e.g.  giveskill 5
+    clearskill                        remove all unspent skill points
 
 
 GOOD TO KNOW

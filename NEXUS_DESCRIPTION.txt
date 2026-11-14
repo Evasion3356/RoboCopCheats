@@ -1,5 +1,5 @@
 [size=5][b]RoboCop Cheats[/b][/size]
-A clickable in-game menu for giving yourself weapons [b]with working ammo[/b], ammo, Auto-9 chips and upgrade boards. No Cheat Engine needed.
+A clickable in-game menu for giving yourself weapons [b]with working ammo[/b], ammo, Auto-9 chips, upgrade boards and skill points. No Cheat Engine needed.
 
 [size=4][b]Why[/b][/size]
 The built-in [i]AddWeapon[/i] cheat gives guns with no ammo, and [i]Add B_AmmoRifle[/i] / [i]B_AmmoLMG[/i] silently do nothing. Cheat Engine infinite-ammo scripts break weapon swapping and can corrupt saves. This mod uses the game's own inventory code, so weapons arrive fully loaded and behave like a real pickup.
@@ -11,6 +11,7 @@ The built-in [i]AddWeapon[/i] cheat gives guns with no ammo, and [i]Add B_AmmoRi
 [*][b]Auto-9 chips[/b]: click which sides connect, set the value % the game shows, pick a look
 [*][b]Auto-9 upgrade boards[/b]
 [*][b]DLC starting weapon[/b] (Deluxe edition): start levels with any weapon instead of the OCP Combat Shotgun
+[*][b]Skill points[/b]: add them, or clear unspent ones once every skill is maxed
 [*]Hotkeys (F7/F8/F9) and console commands as an alternative to the menu
 [/list]
 Unfinished weapons from the game files (white/untextured or unusable) are deliberately left out.

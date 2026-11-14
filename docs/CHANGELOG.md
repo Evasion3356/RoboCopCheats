@@ -4,6 +4,13 @@ All notable user-facing changes to RoboCop Cheats are recorded here. Format
 loosely follows [Keep a Changelog](https://keepachangelog.com/). The release
 workflow takes each version's notes from its `## [X.Y]` section.
 
+## [Unreleased]
+
+### Added
+- Skills page in the menu: add skill points (console: `giveskill [amount]`).
+- Remove unspent skill points, to stop the reminder once every skill is maxed
+  (console: `clearskill`).
+
 ## [1.0] - 2026-11-13
 
 ### Added
