@@ -5,28 +5,33 @@
     Hotkeys (in game):
       F7  / F8   previous / next weapon in the list
       F9         give the selected weapon (calls Backpack directly, with default ammo)
-      F6         dump the Backpack API + chip/board info (rcchipdump) to UE4SS.log
 
     Console commands (UE4SS console or the in-game console, if enabled):
       givelist                     list the weapons with their index numbers
       give <index|name>            e.g.  give 3   /   give AKM   /   give WP_BrowningM60
       giveammo <B_AmmoX> [amount]  e.g.  giveammo B_AmmoRifle 200
-      rcdump                       dump the Backpack API
       givechip <arms> [percent] [look]  arms = letters U R D L; percent = value shown in game;
                                    look 1-4 (1 = normal). e.g.  givechip UD 45
-      givechipraw <Shape> <rot> <boost> <tier>   raw AddPredefinedChip (tier 0-3)
       boardlist                    list weapon upgrade boards (DT_WeaponUpgradeBoards rows)
       giveboard <index|row>        give an upgrade board
       dlcweapon <index|name|default>  weapon the Deluxe/DLC edition starts levels with
                                    (instead of the OCP Combat Shotgun); saved to dlc_weapon.txt
+
+    Developer tools (only when DEV_TOOLS = true below):
+      F6 / rcdump                  dump the Backpack API + chip/board info to UE4SS.log
       rcchipdump                   chip enum, board functions and board rows to the log
       rcchipmap   (Ctrl+F6)        research: each chip's shape/rotation vs. what its widget shows
       rcchipinfo                   research: full chip/backpack/widget property dump (large)
+      givechipraw <Shape> <rot> <boost> <tier>   raw AddPredefinedChip (tier 0-3)
 
     Everything is logged with the [RoboCopCheats] prefix in ue4ss\UE4SS.log.
 ]]
 
 local UEHelpers = require("UEHelpers")
+
+local MOD_VERSION = "1.0"
+-- Research/debug hotkeys and console commands. Off in releases.
+local DEV_TOOLS = false
 
 local TAG = "[RoboCopCheats] "
 local DEFAULT_AMMO_AMOUNT = 200
@@ -1050,12 +1055,14 @@ RegisterKeyBind(Key.F9, function()
     local w = WEAPONS[selected]
     ExecuteInGameThread(function() GiveWeapon(w) end)
 end)
-RegisterKeyBind(Key.F6, function()
-    ExecuteInGameThread(function() DumpApi() ChipDump() end)
-end)
-RegisterKeyBind(Key.F6, { ModifierKey.CONTROL }, function()
-    ExecuteInGameThread(ChipMap)
-end)
+if DEV_TOOLS then
+    RegisterKeyBind(Key.F6, function()
+        ExecuteInGameThread(function() DumpApi() ChipDump() end)
+    end)
+    RegisterKeyBind(Key.F6, { ModifierKey.CONTROL }, function()
+        ExecuteInGameThread(ChipMap)
+    end)
+end
 
 ----------------------------------------------------------------------------
 -- Console commands
@@ -1091,52 +1098,12 @@ RegisterConsoleCommandHandler("giveammo", function(_, Params, Ar)
     return true
 end)
 
-RegisterConsoleCommandHandler("rcdump", function()
-    ExecuteInGameThread(DumpApi)
-    return true
-end)
-
-RegisterConsoleCommandHandler("rcchipmap", function()
-    ExecuteInGameThread(ChipMap)
-    return true
-end)
-
-RegisterConsoleCommandHandler("rcchipinfo", function()
-    ExecuteInGameThread(ChipInfo)
-    return true
-end)
-
-RegisterConsoleCommandHandler("rcchipdump", function()
-    ExecuteInGameThread(ChipDump)
-    return true
-end)
-
 RegisterConsoleCommandHandler("givechip", function(_, Params, Ar)
     local mask = Params[1] and ParseArms(Params[1]) or 0
     if mask == 0 then Out(Ar, "Usage: givechip <arms U/R/D/L> [percent] [look 1-4]   e.g. givechip UR 45") return true end
     local pct = tonumber(Params[2]) or DEFAULT_CHIP_PERCENT
     local look = tonumber(Params[3]) or (DEFAULT_CHIP_TIER + 1)
     ExecuteInGameThread(function() GiveChip(mask, pct, look) end)
-    return true
-end)
-
-RegisterConsoleCommandHandler("givechipraw", function(_, Params, Ar)
-    if #Params < 2 then Out(Ar, "Usage: givechipraw <Shape> <rotation> [boost] [tier]") return true end
-    local shape, rot = Params[1], tonumber(Params[2]) or 0
-    local boost = tonumber(Params[3]) or PercentToBoost(DEFAULT_CHIP_PERCENT)
-    local tier = tonumber(Params[4]) or DEFAULT_CHIP_TIER
-    ExecuteInGameThread(function()
-        local enum = ChipEnumValues() or {}
-        local value = enum[shape]
-        if value == nil then Notify("Unknown shape " .. shape) return end
-        local bp = GetBackpack()
-        if not bp then Notify("No Backpack found.") return end
-        -- raw: rotation goes to the game exactly as typed (no CHIP_ROT_UNIT scaling)
-        tier = ClampTier(tier)
-        local ok, err = pcall(function() bp:AddPredefinedChip(value, boost, rot, tier) end)
-        Notify(ok and string.format("Gave raw chip %s rot %d boost %d tier %d", shape, rot, boost, tier)
-                  or ("AddPredefinedChip failed: " .. tostring(err)))
-    end)
     return true
 end)
 
@@ -1177,6 +1144,48 @@ RegisterConsoleCommandHandler("giveboard", function(_, Params, Ar)
     end)
     return true
 end)
+
+if DEV_TOOLS then
+    RegisterConsoleCommandHandler("rcdump", function()
+        ExecuteInGameThread(DumpApi)
+        return true
+    end)
+
+    RegisterConsoleCommandHandler("rcchipmap", function()
+        ExecuteInGameThread(ChipMap)
+        return true
+    end)
+
+    RegisterConsoleCommandHandler("rcchipinfo", function()
+        ExecuteInGameThread(ChipInfo)
+        return true
+    end)
+
+    RegisterConsoleCommandHandler("rcchipdump", function()
+        ExecuteInGameThread(ChipDump)
+        return true
+    end)
+
+    RegisterConsoleCommandHandler("givechipraw", function(_, Params, Ar)
+        if #Params < 2 then Out(Ar, "Usage: givechipraw <Shape> <rotation> [boost] [tier]") return true end
+        local shape, rot = Params[1], tonumber(Params[2]) or 0
+        local boost = tonumber(Params[3]) or PercentToBoost(DEFAULT_CHIP_PERCENT)
+        local tier = tonumber(Params[4]) or DEFAULT_CHIP_TIER
+        ExecuteInGameThread(function()
+            local enum = ChipEnumValues() or {}
+            local value = enum[shape]
+            if value == nil then Notify("Unknown shape " .. shape) return end
+            local bp = GetBackpack()
+            if not bp then Notify("No Backpack found.") return end
+            -- raw: rotation goes to the game exactly as typed (no CHIP_ROT_UNIT scaling)
+            tier = ClampTier(tier)
+            local ok, err = pcall(function() bp:AddPredefinedChip(value, boost, rot, tier) end)
+            Notify(ok and string.format("Gave raw chip %s rot %d boost %d tier %d", shape, rot, boost, tier)
+                      or ("AddPredefinedChip failed: " .. tostring(err)))
+        end)
+        return true
+    end)
+end
 
 ----------------------------------------------------------------------------
 -- GUI tab bridge. dlls/main.dll registers the RC_UI_* globals right after this
@@ -1254,4 +1263,5 @@ LoopInGameThreadWithDelay(100, function()
     end
 end)
 
-Log("Loaded. F7/F8 select, F9 give, F6 dump API. Console: givelist, give, giveammo, rcdump, givechip, boardlist, giveboard, dlcweapon, rcchipdump.")
+Log("v" .. MOD_VERSION .. " loaded. F7/F8 select, F9 give. Console: givelist, give, giveammo, givechip, boardlist, giveboard, dlcweapon."
+    .. (DEV_TOOLS and " Dev tools: F6/rcdump, Ctrl+F6/rcchipmap, rcchipinfo, rcchipdump, givechipraw." or ""))

@@ -1,0 +1,39 @@
+[size=5][b]RoboCop Cheats[/b][/size]
+A clickable in-game menu for giving yourself weapons [b]with working ammo[/b], ammo, Auto-9 chips and upgrade boards. No Cheat Engine needed.
+
+[size=4][b]Why[/b][/size]
+The built-in [i]AddWeapon[/i] cheat gives guns with no ammo, and [i]Add B_AmmoRifle[/i] / [i]B_AmmoLMG[/i] silently do nothing. Cheat Engine infinite-ammo scripts break weapon swapping and can corrupt saves. This mod uses the game's own inventory code, so weapons arrive fully loaded and behave like a real pickup.
+
+[size=4][b]Features[/b][/size]
+[list]
+[*][b]17 weapons[/b], all tested in game: SIG Sauer, Desert Eagle, Uzi, TEC-9, Sterling Mk6, AKM, Steyr AUG, HK G11, HK21, M60, Mossberg, OCP Combat Shotgun, SPAS-12, Barrett M82, Cobra Assault Cannon, MM-1, ATGM
+[*][b]Ammo[/b] for every weapon, in any amount (including Rifle and LMG ammo)
+[*][b]Auto-9 chips[/b]: click which sides connect, set the value % the game shows, pick a look
+[*][b]Auto-9 upgrade boards[/b]
+[*][b]DLC starting weapon[/b] (Deluxe edition): start levels with any weapon instead of the OCP Combat Shotgun
+[*]Hotkeys (F7/F8/F9) and console commands as an alternative to the menu
+[/list]
+Unfinished weapons from the game files (white/untextured or unusable) are deliberately left out.
+
+[size=4][b]Requirements[/b][/size]
+[list]
+[*]Steam version (tested on build 22996396). Game Pass/Epic untested.
+[*][b]Main file[/b] already includes RE-UE4SS v4.0.0, nothing else needed.
+[*][b]Mod-only file[/b] requires RE-UE4SS [b]v4.0.0 exactly[/b], plus the ini settings listed in the readme.
+[/list]
+
+[size=4][b]Installation[/b][/size]
+Steam > right-click the game > Manage > Browse local files, then extract the zip there (its [i]Game[/i] folder merges with the game's). Start the game, open the "RoboCop Cheats" tab in the UE4SS window (Ctrl+O toggles it). Borderless/windowed mode recommended.
+
+[b]Uninstall:[/b] delete [i]dwmapi.dll[/i] and the [i]ue4ss[/i] folder from [i]Game\Binaries\Win64[/i].
+
+[size=4][b]Notes[/b][/size]
+[list]
+[*]Back up your saves first: [i]%LOCALAPPDATA%\RoboCop\Saved\SaveGames[/i]
+[*]A new DLC starting weapon applies at the next fresh level start (Chapter Select or a level transition), not when loading a save.
+[*]Achievements with the mod installed: untested.
+[*]Antivirus warnings: UE4SS loads via a proxy [i]dwmapi.dll[/i], which some scanners flag. It is the official RE-UE4SS v4.0.0 file.
+[/list]
+
+[size=4][b]Credits[/b][/size]
+[url=https://github.com/UE4SS-RE/RE-UE4SS]RE-UE4SS[/url] (MIT license)

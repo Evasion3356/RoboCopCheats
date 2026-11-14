@@ -14,7 +14,10 @@ Goal: an in-game way (clickable menu + hotkeys/console) to spawn weapons **with 
 - `cpp/` — C++ mod source. `cpp/CMakeLists.txt` pulls in `_deps/RE-UE4SS`; `cpp/RoboCopCheats/dllmain.cpp` is the tab. Post-build copies the DLL to `Win64/ue4ss/Mods/RoboCopCheats/dlls/main.dll`.
 - `_deps/RE-UE4SS/` (gitignored) — UE4SS source at tag **v4.0.0** with submodules (UEPseudo is private; user's GitHub has access). Submodules use SSH URLs; fetch with `git -c url."https://github.com/".insteadOf="git@github.com:" submodule update --init --recursive --depth 1`.
 - `_downloads/` — original UE4SS zip + zCustomGameConfigs (no RoboCop entry exists; defaults work). Reference only.
-- `README.txt` — user-facing install/usage.
+- `README.txt` — **public** readme (ships in the zips as `RoboCopCheats-README.txt`). No personal paths in it.
+- `NEXUS_DESCRIPTION.txt` — Nexus mod page text (BBCode).
+- `make_release.ps1` — builds `dist/RoboCopCheats-<ver>-full.zip` (UE4SS + mod) and `-modonly.zip` into `dist/` (gitignored). Zips are rooted at the game folder (`Game/Binaries/Win64/...`). Release-only changes: `ConsoleEnabled = 0`, no `dlc_weapon.txt`. Refuses to build if `DEV_TOOLS` is on or README doesn't mention the version. Version = `MOD_VERSION` in main.lua (DLL `ModVersion` is "1.0" too).
+- `Win64/ue4ss/Mods/RoboCopCheats/enabled.txt` — lets the mod-only release load without editing mods.txt (UE4SS skips already-started mods, so no double load with the mods.txt entry; checked in v4.0.0 source `start_mods`).
 
 ## Building the C++ mod
 - Toolchain: VS 2026 Community (MSVC 14.51), its bundled CMake + Ninja, Rust stable (needed by patternsleuth).
@@ -26,6 +29,7 @@ Goal: an in-game way (clickable menu + hotkeys/console) to spawn weapons **with 
 - Crash triage: UE4SS writes `ue4ss/crash_*.dmp`. With no WinDbg installed, parse it with the `minidump` pip package, then symbolize `main.dll+offset` via dbghelp `SymFromAddr`/`SymGetLineFromAddr` against `cpp/build/RoboCopCheats/RoboCopCheats.pdb`.
 
 ## Game facts
+- Steam app 1681430; release tested on build **22996396**.
 - Install: `C:\Program Files (x86)\Steam\steamapps\common\Robocop Rogue City`
 - Executable: `Game\Binaries\Win64\RoboCop-Win64-Shipping.exe`, Unreal Engine **5.2**, IoStore paks (`.pak` + `.utoc`).
 - `Manifest_UFSFiles_Win64.txt` in the install root lists **every asset path** — grep it instead of guessing paths.
@@ -69,13 +73,14 @@ Goal: an in-game way (clickable menu + hotkeys/console) to spawn weapons **with 
 - [x] Ammo giving via `AddItemsOfClassToBackpack` verified in game (2026-11-13 17:47): every type incl. Rifle, LMG and Auto-9 reported added; user confirmed it works. This fixes the 2023 `Add B_AmmoRifle/LMG` failure.
 - [ ] `AmmoAdded` out-param detection (`HasAnyPropertyFlags`) doesn't trigger; harmless, value just isn't logged.
 - [x] Removed `WP_BaseballBat` (2026-11-13): spawns but can't be used.
-- [ ] **Chips & boards** (2026-11-13). Chips: menu = arms "+", Value %, Look; mapping and formula confirmed from the game's own chip widgets (`rcchipmap`), DLL with the new menu built but not yet tested in game. Boards: untested.
+- [x] **Chips** (2026-11-13): menu = arms "+", Value %, Look; mapping and formula confirmed from the game's own chip widgets (`rcchipmap`). **Tested and working in game** (user confirmed).
+- [ ] **Boards: still untested in game.** The only feature in the v1.0 release that hasn't been verified.
   - Chips are `B_OCP_Chip`/`B_ChipItem` items (ChipItem: `ConnectionType`, `Boost`, `RotationOffset`, `ChipTier`) in `Backpack.ChipsSlots`. Chips have **no stat**: the board node they sit on decides it.
   - `EChipConnectionType` Omni=0, TShape=1, LShape=2, PassThrough=3, DeadEnd=4. Sides 0=Left 1=Up 2=Right 3=Down; each `RotationOffset` step = quarter turn clockwise. At rotation 0: DeadEnd=L, LShape=L+D, PassThrough=L+R, TShape=L+R+D. Verified against all 15 combinations seen in game.
   - Shown % = `Boost * 1.5` rounded half up (25->38%, 30->45%). Game drops top out at 45% (boost 30); the user's 300% chips came from Cheat Engine.
   - **`ChipTier` must be 0..3**: the widget has 4 tier textures (`T_Chip01..04`). Tier 10 crashed the game when the inventory opened (UE crash 18:06, AV reading 0x38). Lua clamps it. Tier 0 = normal look, tier 1 = hollow ring; tier doesn't change the %. Shown to the user as "Look" 1-4.
   - Boards: `/Script/Game.GlobalFunctionLibrary:AddWeaponUpgradeBoardToPlayer(Object WorldContextObject, DataTableRowHandle BoardHandle)`, static. Rows of `DT_WeaponUpgradeBoards`: Tier2_Tutorial, Tier3_1..3, Tier4_1..3, Tier5_1..3, Tier6, Tier6_1..3.
-  - Research commands kept: `rcchipdump`, `rcchipinfo` (large), `rcchipmap` (Ctrl+F6, upgrade screen open).
+  - Research commands kept but behind `DEV_TOOLS = false` in main.lua (off in releases): F6/`rcdump`, `rcchipdump`, `rcchipinfo` (large), `rcchipmap` (Ctrl+F6, upgrade screen open), `givechipraw`. Set `DEV_TOOLS = true` to use them.
 - [x] **DLC starting weapon** (2026-11-13), verified in game. On levels with `bShouldAddDLCWeapon` (LevelData struct) the game gives the class in `Backpack.DeluxeEditionPlayerWeapon` (ClassProperty, default `WP_MossbergBullpup_C`) at a fresh level start. Save loads and checkpoint restarts restore the saved inventory instead, so test with Chapter Select or a level transition. The mod sets that property on the live Backpack right after it's created (`NotifyOnNewObject("/Script/Game.Backpack")`, deferred with `ExecuteInGameThread`), with a 0.5 s poll as backup. Verified 18:59: the Backpack was switched to the Cobra in the same instant it was created, and the Cobra was received. Saved as `Mods/RoboCopCheats/dlc_weapon.txt` (asset name or `default`). GUI: combo on Weapons & Ammo (`RC_UI_SetDlcWeapon`, request `"dlcweapon <asset|default>"`); console `dlcweapon`.
   - **Dead ends, don't retry:** RegisterHook on `Backpack:TryToAddDlcWeaponToBackpack` never fires (the game calls it natively). `FindAllOf("Backpack")` returns no `Default__` templates. **Writing the property on `/Script/Game.Default__Backpack` corrupted it** (read back as an `InteractiveComponent`) and didn't affect new Backpacks; the BP_MyGameState subobject template paths don't exist.
 - [ ] Later ideas: melee via `Backpack:SetMeleeWeapon` with the DLC1 `WP_MeleeWeapon_BaseballBat_Child` / `WP_MeleeWeapon_Hammer` (signature unknown; dump it first).
