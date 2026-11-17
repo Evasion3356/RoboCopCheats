@@ -6,6 +6,13 @@ workflow takes each version's notes from its `## [X.Y]` section.
 
 ## [Unreleased]
 
+### Added
+- Secrets & police work page (pause menu, menu window, console `secrets`): the
+  items the end-of-level grade counts, marked found / missing for the current
+  save, with the current chapter first. Updates as you play.
+- Waypoints for missing secrets: click one to put the game's waypoint marker on
+  it (most secrets and some police work; it disappears when you reach it).
+
 ## [1.1] - 2026-11-13
 
 ### Added

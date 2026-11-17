@@ -12,6 +12,7 @@ The built-in [i]AddWeapon[/i] cheat gives guns with no ammo, and [i]Add B_AmmoRi
 [*][b]Auto-9 upgrade boards[/b]
 [*][b]DLC starting weapon[/b] (Deluxe edition): start levels with any weapon instead of the OCP Combat Shotgun
 [*][b]Skill points[/b]: add them, or clear unspent ones once every skill is maxed
+[*][b]Secrets & police work checklist[/b]: the items the end-of-level grade counts ("OCP Bank secret #1 found", "Bank Intruder arrested"...), shown as found / missing for your save while you play, so you know what's left before the level ends. Click a missing secret to put a waypoint marker on it
 [*][b]In the pause menu[/b]: press Esc and pick "RoboCop Cheats" (mouse, or arrow keys + Enter)
 [*]Optional UE4SS window with the same features (Ctrl+O)
 [*]Hotkeys (F7/F8/F9) and console commands as an alternative to the menu

@@ -14,6 +14,11 @@
 //   RC_UI_Status(msg)                   status line shown at the top of the tab
 //   RC_UI_SetDlcWeapon(asset)           current DLC starting weapon ("default" = game's own)
 //                                       (combo sends "dlcweapon <asset|default>")
+//   RC_UI_SetSecrets(text)              secrets & police work checklist (read-only): lines
+//                                       "C<TAB>chapter<TAB>found<TAB>total<TAB>current 0|1", followed by
+//                                       "I<TAB>found 1|0|?<TAB>kind<TAB>text<TAB>flag<TAB>waypoint 1|0"
+//                                       lines; "" = not in a level. Buttons send "waypoint <flag>" /
+//                                       "waypointclear".
 // The GUI runs on UE4SS's render thread and Lua polls on the game thread, so all shared
 // state is behind one mutex.
 
@@ -49,6 +54,24 @@ namespace
     std::vector<WeaponEntry> g_boards; // display label + DataTable row name
     std::deque<std::string> g_requests;
     std::string g_dlc_weapon = "default"; // asset name, or "default"
+
+    struct ChecklistItem
+    {
+        char found; // '1', '0' or '?' (couldn't read)
+        std::string kind;
+        std::string text;
+        std::string flag;      // OB_Evaluation property, e.g. L09_Secret_01
+        bool waypoint = false; // a known spot exists (button sends "waypoint <flag>")
+    };
+    struct ChecklistChapter
+    {
+        std::string title;
+        int found = 0;
+        int total = 0;
+        bool current = false;
+        std::vector<ChecklistItem> items;
+    };
+    std::vector<ChecklistChapter> g_checklist; // empty = not in a level
     std::string g_status = "Waiting for the RoboCopCheats Lua script to start...";
     bool g_lua_connected = false;
 
@@ -70,6 +93,7 @@ namespace
         g_weapons.clear();
         g_ammo.clear();
         g_boards.clear();
+        g_checklist.clear();
         g_requests.clear();
         g_lua_connected = true;
         g_status = "Ready. Load into a level, then click a weapon.";
@@ -131,6 +155,56 @@ namespace
         std::string asset{lua.get_string()};
         std::lock_guard lock{g_mutex};
         g_dlc_weapon = std::move(asset);
+        return 0;
+    }
+
+    std::vector<std::string> split(const std::string& s, char sep)
+    {
+        std::vector<std::string> out;
+        size_t start = 0;
+        while (true)
+        {
+            const size_t end = s.find(sep, start);
+            out.push_back(s.substr(start, end - start));
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        return out;
+    }
+
+    int rc_lua_set_secrets(const LuaMadeSimple::Lua& lua)
+    {
+        if (!lua.is_string()) return 0;
+        std::string text{lua.get_string()};
+        std::vector<ChecklistChapter> chapters;
+        if (!text.empty())
+        {
+            for (const auto& line : split(text, '\n'))
+            {
+                const auto f = split(line, '\t');
+                if (f.size() == 5 && f[0] == "C")
+                {
+                    ChecklistChapter c;
+                    c.title = f[1];
+                    c.found = std::atoi(f[2].c_str());
+                    c.total = std::atoi(f[3].c_str());
+                    c.current = f[4] == "1";
+                    chapters.push_back(std::move(c));
+                }
+                else if (f.size() >= 4 && f[0] == "I" && !chapters.empty() && !f[1].empty())
+                {
+                    ChecklistItem item{f[1][0], f[2], f[3]};
+                    if (f.size() >= 6)
+                    {
+                        item.flag = f[4];
+                        item.waypoint = f[5] == "1";
+                    }
+                    chapters.back().items.push_back(std::move(item));
+                }
+            }
+        }
+        std::lock_guard lock{g_mutex};
+        g_checklist = std::move(chapters);
         return 0;
     }
 
@@ -446,6 +520,74 @@ namespace
         }
     }
 
+    // with_waypoints: only for the current chapter (the target actors only exist in their level).
+    void draw_checklist_chapter(const ChecklistChapter& c, bool with_waypoints)
+    {
+        if (!ImGui::BeginTable(c.title.c_str(), with_waypoints ? 3 : 2, ImGuiTableFlags_SizingFixedFit)) return;
+        ImGui::TableSetupColumn("found", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableSetupColumn("text", ImGuiTableColumnFlags_WidthStretch);
+        if (with_waypoints) ImGui::TableSetupColumn("waypoint", ImGuiTableColumnFlags_WidthFixed);
+        for (const auto& it : c.items)
+        {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            if (it.found == '1') ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f), "Found");
+            else if (it.found == '0') ImGui::TextDisabled("Missing");
+            else ImGui::TextDisabled("?");
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%s", it.text.c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", it.kind.c_str());
+            if (with_waypoints && it.found == '0' && it.waypoint)
+            {
+                ImGui::TableSetColumnIndex(2);
+                ImGui::PushID(it.flag.c_str());
+                if (ImGui::SmallButton("Waypoint")) push_request("waypoint " + it.flag);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Puts the game's map waypoint on it (shows on the compass).\nIt disappears when you reach it.");
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+
+    void draw_secrets_page(const std::vector<ChecklistChapter>& chapters)
+    {
+        ImGui::TextWrapped("What the end-of-level grade counts: secrets and police work, with what you've done so far "
+                           "in this save. Updates as you play. Where a missing item has one spot, Waypoint marks it.");
+        if (chapters.empty())
+        {
+            ImGui::Spacing();
+            ImGui::TextWrapped("Available once you're in a level.");
+            return;
+        }
+        const ChecklistChapter* current = nullptr;
+        for (const auto& c : chapters)
+        {
+            if (c.current) current = &c;
+        }
+        ImGui::SeparatorText("This chapter");
+        if (current)
+        {
+            ImGui::Text("%s: %d/%d", current->title.c_str(), current->found, current->total);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove waypoint")) push_request("waypointclear");
+            draw_checklist_chapter(*current, true);
+        }
+        else
+        {
+            ImGui::TextDisabled("This chapter has no secrets or police work.");
+        }
+        ImGui::SeparatorText("All chapters");
+        if (ImGui::BeginChild("chapters", ImVec2(0, 0)))
+        {
+            for (const auto& c : chapters)
+            {
+                const std::string label = std::format("{}: {}/{}###{}", c.title, c.found, c.total, c.title);
+                if (ImGui::CollapsingHeader(label.c_str())) draw_checklist_chapter(c, false);
+            }
+        }
+        ImGui::EndChild();
+    }
+
     void draw_cheats_tab()
     {
         if (!bind_ue4ss_imgui()) return;
@@ -455,9 +597,11 @@ namespace
         std::vector<WeaponEntry> boards;
         std::string status;
         std::string dlc_weapon;
+        std::vector<ChecklistChapter> checklist;
         bool connected;
         {
             std::lock_guard lock{g_mutex};
+            checklist = g_checklist;
             weapons = g_weapons;
             ammo = g_ammo;
             boards = g_boards;
@@ -490,6 +634,11 @@ namespace
             draw_skills_page();
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("Secrets"))
+        {
+            draw_secrets_page(checklist);
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
     }
 } // namespace
@@ -501,7 +650,7 @@ class RoboCopCheatsMod : public CppUserModBase
     {
         ModName = STR("RoboCopCheats");
         ModVersion = STR("1.0");
-        ModDescription = STR("Cheats tab for RoboCop: Rogue City: weapons, ammo, DLC starting weapon, Auto-9 chips, upgrade boards, skill points");
+        ModDescription = STR("Cheats tab for RoboCop: Rogue City: weapons, ammo, DLC starting weapon, Auto-9 chips, upgrade boards, skill points, secrets checklist");
         ModAuthors = STR("Evasion3356");
 
         register_tab(STR("RoboCop Cheats"), [](CppUserModBase*) { draw_cheats_tab(); });
@@ -525,6 +674,7 @@ class RoboCopCheatsMod : public CppUserModBase
         lua.register_function("RC_UI_Pop", &rc_lua_pop);
         lua.register_function("RC_UI_Status", &rc_lua_status);
         lua.register_function("RC_UI_SetDlcWeapon", &rc_lua_set_dlc_weapon);
+        lua.register_function("RC_UI_SetSecrets", &rc_lua_set_secrets);
         Output::send<LogLevel::Verbose>(STR("[RoboCopCheats] GUI bridge registered\n"));
     }
 

@@ -8,6 +8,8 @@ A clickable in-game menu (plus hotkeys and console commands) to give yourself:
   - Auto-9 upgrade boards
   - a different DLC starting weapon (Deluxe edition) instead of the OCP Combat Shotgun
   - skill points
+and shows a checklist of each chapter's secrets and police work (what the end-of-level
+grade counts), so you can see what you've missed before the level ends.
 
 Built on RE-UE4SS v4.0.0. Tested on the Steam version, build 22996396.
 
@@ -39,7 +41,7 @@ UNINSTALL
 MENU
   In game: press Esc and pick "RoboCop Cheats" at the bottom of the pause menu (mouse, or
   arrow keys + Enter). It has pages for Weapons, Ammo, Chips, Upgrade boards, Skill
-  points and the DLC starting weapon. Settings such as the ammo amount or a chip's value
+  points, the DLC starting weapon and Secrets & police work. Settings such as the ammo amount or a chip's value
   change each time you pick them. The result of each action shows at the top of the
   screen for a few seconds; on the DLC starting weapon page, "> " marks the current
   choice. The "Back" entry returns to the previous page.
@@ -69,6 +71,16 @@ MENU
     - Remove unspent points: sets unspent points to 0. Useful once every skill is maxed,
       when leveling up keeps giving points you can't spend (and the game keeps reminding you).
 
+  Secrets
+    - The secrets and police work the end-of-level grade counts (e.g. "OCP Bank secret
+      #1 found", "Bank Intruder arrested"), marked Found or Missing for your current save.
+      Your current chapter is shown first; it updates as you play.
+    - Missing items that are at one spot (most secrets) can be clicked ("set waypoint")
+      to put the game's waypoint marker on them. It disappears when you reach it, or use
+      "Remove waypoint". It only works in that chapter, once the game has loaded that area.
+      Items about a whole area (e.g. "All hostages saved") have no waypoint.
+    - Chapters without any (e.g. Metro West) show none.
+
 
 HOTKEYS AND CONSOLE (once you are in a level)
   F7 / F8   previous / next weapon      F9   give the selected weapon
@@ -82,6 +94,7 @@ HOTKEYS AND CONSOLE (once you are in a level)
     dlcweapon <number|name|default>   e.g.  dlcweapon M60
     giveskill [amount]                e.g.  giveskill 5
     clearskill                        remove all unspent skill points
+    secrets                           secrets & police work checklist, this chapter first
 
 
 GOOD TO KNOW

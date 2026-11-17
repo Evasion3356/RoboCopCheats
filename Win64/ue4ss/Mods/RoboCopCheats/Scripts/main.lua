@@ -18,6 +18,8 @@
                                    (instead of the OCP Combat Shotgun); saved to dlc_weapon.txt
       giveskill [amount]           add unspent skill points (default 1, max 100 per call)
       clearskill                   remove all unspent skill points
+      secrets                      secrets & police work (the end-of-level grade items):
+                                   found / not found, this chapter first
 
     Developer tools (only when DEV_TOOLS = true below):
       F6 / rcdump                  dump the Backpack API + chip/board info to UE4SS.log
@@ -29,6 +31,8 @@
                                    (open the pause menu first)
       rcmenuwatch                  research: toggle logging of every pause menu/button
                                    blueprint function call (to see what a click runs)
+      rcevaldump                   research: objective API + hidden end-of-level evaluation
+                                   objective (secrets / police work) state, run mid-level
 
     Pause menu: "RoboCop Cheats" at the bottom of the game's pause menu opens the same
     features as in-game pages (mouse, or arrow keys + Enter).
@@ -875,6 +879,12 @@ local function Scalar(v)
     return tostring(v)
 end
 
+-- pcall result -> value, keeping false (not `ok and v or ...`, which turns false into the fallback).
+local function Readable(ok, v)
+    if ok then return v end
+    return "<unreadable>"
+end
+
 local DumpVal
 DumpVal = function(v, prop, label, indent, depth)
     local pad = string.rep("  ", indent)
@@ -888,7 +898,7 @@ DumpVal = function(v, prop, label, indent, depth)
             prop:GetStruct():ForEachProperty(function(sp)
                 local n = sp:GetFName():ToString()
                 local ok, sv = pcall(function() return v[n] end)
-                DumpVal(ok and sv or "<unreadable>", sp, n, indent + 1, depth + 1)
+                DumpVal(Readable(ok, sv), sp, n, indent + 1, depth + 1)
             end)
         end)
     elseif t == "ArrayProperty" then
@@ -939,7 +949,7 @@ local function DumpObject(obj, stopAt)
         cls:ForEachProperty(function(prop)
             local n = prop:GetFName():ToString()
             local ok, v = pcall(function() return obj[n] end)
-            DumpVal(ok and v or "<unreadable>", prop, cname .. "." .. n, 1, 0)
+            DumpVal(Readable(ok, v), prop, cname .. "." .. n, 1, 0)
         end)
         cls = cls:GetSuperStruct()
     end
@@ -968,7 +978,7 @@ local function ChipInfo()
                 local l = n:lower()
                 if l:find("chip") or l:find("board") or l:find("upgrade") then
                     local ok, v = pcall(function() return bp[n] end)
-                    DumpVal(ok and v or "<unreadable>", prop, n, 1, 0)
+                    DumpVal(Readable(ok, v), prop, n, 1, 0)
                 else
                     Log("  " .. n .. " (" .. PropType(prop) .. ")")
                 end
@@ -1216,6 +1226,248 @@ local function ClearSkillPoints()
                      or ("Tried to remove skill points, but " .. tostring(after) .. " are still unspent"))
 end
 
+----------------------------------------------------------------------------
+-- Secrets & police work checklist.
+-- The end-of-level grade ("OCP Bank secret #1 found", "Bank Intruder arrested") is a hidden
+-- objective, OB_Evaluation, with one bool per item (L09_Secret_01 ...). Each level's own
+-- script sets them during play (confirmed 2026-11-16: the SWAT challenge flag went 0 -> 1
+-- mid-level) and they are saved with the game. The grade screen reads them at level end.
+-- Items and texts below come from the extracted OB_Evaluation asset (which flag goes with
+-- which grade line); headings are the game's chapter-select names. The flag prefix is the
+-- grade group, not the map: e.g. the Juneberry Mall secret is set in the L12 map, and the
+-- "20 - Downtown" flags in the L19_OpenCity maps. Flags the grade never reads
+-- (L06_Secret_02, L15_PoliceWork_02/04) are left out.
+----------------------------------------------------------------------------
+local EVAL_CLASS = "/Game/Quests/OB_Evaluation.OB_Evaluation_C"
+local SECRET, POLICE = "Secret", "Police work"
+
+local EVAL_CHAPTERS = {
+    { title = "01 - Channel 9 Headquarters", maps = { "^L01_" }, items = {
+        { "L01_Secret_01", SECRET, "TV Station secret #1 found" },
+        { "L01_Secret_02", SECRET, "TV Station secret #2 found" },
+        { "L01_PoliceWork_01", POLICE, "All Office Hostages saved" },
+        { "L01_PoliceWork_02", POLICE, "All Studio Hostages saved" } } },
+    { title = "03 - Downtown", maps = { "^L03_" }, items = {
+        { "L03_Secret_01", SECRET, "Arcade Owner connections discovered" },
+        { "L03_Secret_02", SECRET, "Warning note for Maurice found" },
+        { "L03_PoliceWork_01", POLICE, "Graffiti Artist busted" },
+        { "L03_PoliceWork_02", POLICE, "The grocery store incident resolved" } } },
+    { title = "06 - Steel Mill", maps = { "^L06_" }, items = {
+        { "L06_Secret_01", SECRET, "Briggs' Squad Car investigated" },
+        { "L06_Secret_03", SECRET, "All stolen OCP Chests found" },
+        { "L06_PoliceWork_01", POLICE, "The challenge against ED-209 won" },
+        { "L06_PoliceWork_02", POLICE, "Intoxicated Hostage saved" } } },
+    { title = "09 - OCP Bank", maps = { "^L09_" }, items = {
+        { "L09_Secret_01", SECRET, "OCP Bank secret #1 found" },
+        { "L09_Secret_02", SECRET, "OCP Bank secret #2 found" },
+        { "L09_PoliceWork_01", POLICE, "The challenge against SWAT Team won" },
+        { "L09_PoliceWork_02", POLICE, "Bank Intruder arrested" } } },
+    { title = "11 - Downtown / 12 - Juneberry Mall", maps = { "^L11_", "^L12_" }, items = {
+        { "L11_Secret_01", SECRET, "Downtown secret found" },
+        { "L11_Secret_02", SECRET, "Juneberry Mall secret found" },
+        { "L11_PoliceWork_01", POLICE, "All Courthouse hostages saved" },
+        { "L11_PoliceWork_02", POLICE, "Samantha's belongings recovered" } } },
+    { title = "15 - Old Factory", maps = { "^L15_" }, items = {
+        { "L15_Secret_01", SECRET, "All stolen OCP Chests found" },
+        { "L15_PoliceWork_01", POLICE, "All hostiles neutralized in under 10 min." },
+        { "L15_PoliceWork_03", POLICE, "At least 25 UEDs decapitated" } } },
+    { title = "17 - OCP Correctional Facility", maps = { "^L17_" }, items = {
+        { "L17_Secret_01", SECRET, "Warden's gift discovered" },
+        { "L17_Secret_02", SECRET, "Note about Wendell Antonowsky found" },
+        { "L17_PoliceWork_01", POLICE, "Prisoners released from the freezer" },
+        { "L17_PoliceWork_02", POLICE, "Cunning Prisoner stopped" },
+        { "L17_PoliceWork_03", POLICE, "Electric chair execution stopped" } } },
+    { title = "20 - Downtown", maps = { "^L19_OpenCity", "^L20_" }, items = {
+        { "L20_Secret_01", SECRET, "All stolen OCP Chests found" },
+        { "L20_PoliceWork_01", POLICE, "Fish Shop Owner saved" },
+        { "L20_PoliceWork_02", POLICE, "Cat rescued from the Burning Hotel" } } },
+}
+
+-- Waypoint targets: the actor whose event sets each flag, found by decompiling the level
+-- scripts (kismet-analyzer + the game's .usmap, 2026-11-16) and tracing back from the flag
+-- write to the bound event. Only items tied to one spot; "all hostages saved", kill
+-- contests and the chest counters have no single actor. Several paths = any of them.
+local function MapActor(map, actor)
+    local name = map:match("([^/]+)$")
+    return "/Game/Maps/" .. map .. "." .. name .. ":PersistentLevel." .. actor
+end
+local WAYPOINT_TARGETS = {
+    -- InvestigationFinished of this helper sets the flag
+    L01_Secret_01 = { MapActor("L01_Prologue/L01_PrologueTVstation_Gameplay", "BP_InvestigationHelper_C_2") },
+    L01_Secret_02 = { MapActor("L01_Prologue/L01_PrologueTVstation_Gameplay", "BP_InvestigationHelper_C_3") },
+    L09_Secret_01 = { MapActor("L09_BankHeist/L09_BankHeist_Gameplay", "BP_InvestigationHelper_C_1") },
+    -- ItemLooted of either loot item (same DoOnce gate)
+    L09_Secret_02 = { MapActor("L09_BankHeist/L09_BankHeist_GameplayPart4", "B_LootItem_C_0"),
+                      MapActor("L09_BankHeist/L09_BankHeist_GameplayPart4", "B_LootItem_C_1") },
+    L11_Secret_02 = { MapActor("L12_HauntedMall/L12_HauntedMall_Gameplay", "BP_InvestigationHelper_C_1") },
+    -- InteractionFinished
+    L11_PoliceWork_02 = { MapActor("L11_OpenCity/L11_OpenCity_Gameplay", "B_InteractionHelper_C_567") },
+    L17_Secret_01 = { MapActor("L17_Prison/L17_Prison_GameplayMainFlow", "BP_InvestigationHelper_C_1") },
+    -- OnTaken
+    L17_Secret_02 = { MapActor("L17_Prison/L17_Prison_GameplayMainFlow", "B_ArchiveIndexItem_C_1") },
+    -- OnOpeningStart of the door
+    L17_PoliceWork_01 = { MapActor("L17_Prison/L17_Prison_GameplayMainFlow", "BP_DoubleDoor_C_5") },
+    L20_PoliceWork_02 = { MapActor("L19_OpenCity/L19_Interiors/L19_INT_Hotel/L19_INT_Hotel_Gameplay", "BP_SingleDoor_C_3") },
+}
+
+-- The evaluation objective the game itself uses (there can be several identical copies in
+-- memory; the current GameState's ObjectivesManager hands out the live one).
+local function GetEvaluation()
+    local cls = StaticFindObject(EVAL_CLASS)
+    if not valid(cls) then return nil end
+    local mgr, ev = nil, nil
+    pcall(function() mgr = UEHelpers.GetWorld().GameState.ObjectivesManager end)
+    if not valid(mgr) then return nil end
+    pcall(function() ev = mgr:GetObjective(cls) end)
+    return valid(ev) and ev or nil
+end
+
+local function CurrentMapName()
+    local name = nil
+    pcall(function() name = UEHelpers.GetWorld():GetFName():ToString() end)
+    return name
+end
+
+local function ChapterForMap(map)
+    if not map then return nil end
+    for _, ch in ipairs(EVAL_CHAPTERS) do
+        for _, pat in ipairs(ch.maps) do
+            if map:find(pat) then return ch end
+        end
+    end
+    return nil
+end
+
+-- { chapters = { { chapter, current, found = n, items = { { text, kind, found (bool|nil) } } } } }
+-- or nil when not in a game (main menu, loading).
+local function ReadChecklist()
+    local ev = GetEvaluation()
+    if not ev then return nil end
+    local here = ChapterForMap(CurrentMapName())
+    local out = { current = here, chapters = {} }
+    for _, ch in ipairs(EVAL_CHAPTERS) do
+        local c = { chapter = ch, current = (ch == here), found = 0, items = {} }
+        for _, it in ipairs(ch.items) do
+            local ok, v = pcall(function() return ev[it[1]] end)
+            local found = nil
+            if ok and type(v) == "boolean" then found = v end
+            if found then c.found = c.found + 1 end
+            table.insert(c.items, { text = it[3], kind = it[2], found = found, flag = it[1],
+                                    waypoint = WAYPOINT_TARGETS[it[1]] ~= nil })
+        end
+        table.insert(out.chapters, c)
+    end
+    return out
+end
+
+local function ChecklistMark(found)
+    if found == nil then return "[?] " end
+    return found and "[X] " or "[  ] "
+end
+
+-- Waypoints: the game's own custom map waypoint (B_3DCustomMarkerActor), made the way the
+-- intranet map's AddPlaceable does it (decompiled WB_IntranetMap, 2026-11-16):
+--   remove existing custom markers (RemovePlaceable destroys every B_3DCustomMarkerActor),
+--   BeginDeferredActorSpawnFromClass(ctx, class, transform, 1, nil, 0), set ParentCanvas =
+--   HUD:GetCanvasPanelObjectiveMarkers() (its BeginPlay adds the marker widget to that
+--   canvas, so it must be set before FinishSpawningActor), FinishSpawningActor(actor,
+--   transform, 0), then HUD.WB_Compass:"Add to Compass"(ObjectOnMapComponent,
+--   ObjectOnMapComponent.Icon, LinearColor 0,0,0,0).
+-- The marker removes itself when the player walks into it, and its EndPlay removes the widget.
+local MARKER_DIR, MARKER_ASSET = "/Game/Blueprints/Abstract/", "B_3DCustomMarkerActor"
+
+local function RemoveWaypoints()
+    local n = 0
+    for _, m in ipairs(LiveInstances(MARKER_ASSET .. "_C")) do
+        if pcall(function() m:K2_DestroyActor() end) then n = n + 1 end
+    end
+    return n
+end
+
+local function FindWaypointTarget(flag)
+    for _, path in ipairs(WAYPOINT_TARGETS[flag] or {}) do
+        local a = StaticFindObject(path)
+        if valid(a) then return a end
+    end
+    return nil
+end
+
+local function PlaceWaypoint(flag, label)
+    local target = FindWaypointTarget(flag)
+    if not target then
+        Notify("Can't place that waypoint here. Go to that chapter (or closer to that area) first.")
+        return
+    end
+    local cls = LoadClass(MARKER_DIR, MARKER_ASSET)
+    local gs = StaticFindObject("/Script/Engine.Default__GameplayStatics")
+    local gfl = StaticFindObject("/Script/Game.Default__GlobalFunctionLibrary")
+    local pc = UEHelpers.GetPlayerController()
+    if not (valid(cls) and valid(gs) and valid(gfl) and valid(pc)) then
+        Notify("Waypoint: game classes not found (see UE4SS.log).")
+        Log(string.format("Waypoint: class=%s gs=%s gfl=%s pc=%s", tostring(valid(cls)), tostring(valid(gs)),
+            tostring(valid(gfl)), tostring(valid(pc))))
+        return
+    end
+    local hud, canvas, compass = nil, nil, nil
+    pcall(function() hud = gfl:GetHUD(pc) end)
+    pcall(function() canvas = hud:GetCanvasPanelObjectiveMarkers() end)
+    pcall(function() compass = hud.WB_Compass end)
+    if not (valid(hud) and valid(canvas)) then
+        Notify("Waypoint: the HUD isn't available right now.")
+        Log("Waypoint: HUD " .. tostring(valid(hud)) .. ", marker canvas " .. tostring(valid(canvas)))
+        return
+    end
+    local loc = target:K2_GetActorLocation()
+    local transform = {
+        Rotation = { X = 0.0, Y = 0.0, Z = 0.0, W = 1.0 },
+        Translation = { X = loc.X, Y = loc.Y, Z = loc.Z },
+        Scale3D = { X = 1.0, Y = 1.0, Z = 1.0 },
+    }
+    local removed = RemoveWaypoints()
+    local okB, marker = pcall(function() return gs:BeginDeferredActorSpawnFromClass(pc, cls, transform, 1, nil, 0) end)
+    if not okB or not valid(marker) then
+        Notify("Waypoint: spawning the marker failed (see UE4SS.log).")
+        Log("Waypoint: BeginDeferredActorSpawnFromClass: " .. tostring(marker))
+        return
+    end
+    local okP, errP = pcall(function() marker.ParentCanvas = canvas end)
+    if not okP then Log("Waypoint: setting ParentCanvas: " .. tostring(errP)) end
+    -- B_3DActorParent's BeginPlay only creates the on-screen marker widget when bIsTracked
+    -- is set; a custom marker spawns with it off (logged 2026-11-16: bIsTracked=false,
+    -- MarkerWidget=None). The intranet map never sets it, so its waypoint shows only on the
+    -- compass/minimap. Only other reader: WB_MinimapItem (tracked style).
+    local okT, errT = pcall(function() marker.bIsTracked = true end)
+    if not okT then Log("Waypoint: setting bIsTracked: " .. tostring(errT)) end
+    local okF, err = pcall(function() gs:FinishSpawningActor(marker, transform, 0) end)
+    if not okF then Log("Waypoint: FinishSpawningActor: " .. tostring(err)) end
+    -- State after BeginPlay, for the log.
+    pcall(function()
+        local function S(f) local ok, v = pcall(f) return ok and tostring(v) or "<err>" end
+        local w = nil
+        pcall(function() w = marker.MarkerWidget end)
+        local ml = marker:K2_GetActorLocation()
+        Log(string.format("Waypoint state: bIsTracked=%s ParentCanvas=%s canvasMatches=%s MarkerWidget=%s vis=%s inViewport=%s actorAt=(%.0f, %.0f, %.0f) TargetActor=%s",
+            S(function() return marker.bIsTracked end),
+            S(function() return valid(marker.ParentCanvas) end),
+            S(function() return marker.ParentCanvas:GetAddress() == canvas:GetAddress() end),
+            S(function() return valid(w) end),
+            S(function() return w:GetVisibility() end),
+            S(function() return w:IsInViewport() end),
+            ml.X, ml.Y, ml.Z,
+            S(function() return marker.TargetActor:GetFullName() end)))
+    end)
+    if valid(compass) then
+        local okC, errC = pcall(function()
+            local comp = marker.ObjectOnMapComponent
+            compass["Add to Compass"](compass, comp, comp.Icon, { R = 0.0, G = 0.0, B = 0.0, A = 0.0 })
+        end)
+        if not okC then Log("Waypoint: Add to Compass: " .. tostring(errC)) end
+    end
+    Log(string.format("Waypoint for %s at %s (%.0f, %.0f, %.0f); removed %d old marker(s)",
+        flag, target:GetFullName(), loc.X, loc.Y, loc.Z, removed))
+    Notify("Waypoint set: " .. (label or flag))
+end
+
 local function FindWeapon(query)
     local idx = tonumber(query)
     if idx and WEAPONS[idx] then return WEAPONS[idx] end
@@ -1328,6 +1580,24 @@ RegisterConsoleCommandHandler("clearskill", function()
     return true
 end)
 
+RegisterConsoleCommandHandler("secrets", function(_, _, Ar)
+    ExecuteInGameThread(function()
+        local list = ReadChecklist()
+        if not list then Out(Ar, "Available once you're in a level.") return end
+        -- This chapter first, then the rest.
+        local order = {}
+        for _, c in ipairs(list.chapters) do
+            if c.current then table.insert(order, 1, c) else table.insert(order, c) end
+        end
+        if not list.current then Out(Ar, "This chapter has no secrets or police work.") end
+        for _, c in ipairs(order) do
+            Out(Ar, string.format("%s: %d/%d%s", c.chapter.title, c.found, #c.items, c.current and "  (this chapter)" or ""))
+            for _, it in ipairs(c.items) do Out(Ar, "  " .. ChecklistMark(it.found) .. it.text) end
+        end
+    end)
+    return true
+end)
+
 RegisterConsoleCommandHandler("boardlist", function(_, _, Ar)
     ExecuteInGameThread(function()
         for i, r in ipairs(GetBoardRows()) do Out(Ar, string.format("%2d  %s", i, r)) end
@@ -1431,6 +1701,149 @@ local function DumpClassApi(cls, stopAt)
         end)
         cls = cls:GetSuperStruct()
     end
+end
+
+----------------------------------------------------------------------------
+-- Level evaluation research (dev tools): rcevaldump. Run it mid-level.
+-- The end-of-level grade ("OCP Bank secret #1 found", "Bank Intruder arrested") comes from
+-- a hidden objective, /Game/Quests/OB_Evaluation (a DT_ObjectiveData row like every quest).
+-- Its stages are named L<nn>_Secret_<n> / L<nn>_PoliceWork_<n>, and at level end it calls
+-- GetObjectiveState per stage (found by extracting the asset with retoc, 2026-11-16).
+-- Goal: an in-game checklist of the current level's secrets. This only reads: it logs the
+-- native objective API, the live objectives and every property of OB_Evaluation.
+----------------------------------------------------------------------------
+local EVAL_FUNCS = { GetObjectiveState = true, GetObjectiveStage = true, GetObjectivesStages = true,
+                     ActivateEvaluation = true, SetObjectiveState = true, SetObjectiveStage = true,
+                     CompleteObjective = true, CompleteObjectiveStage = true }
+local OBJECTIVE_TABLE = "/Game/Blueprints/Abstract/Config/DT_ObjectiveData.DT_ObjectiveData"
+
+local SCALAR_TYPES = { BoolProperty = true, IntProperty = true, ByteProperty = true, EnumProperty = true,
+                       FloatProperty = true, DoubleProperty = true, NameProperty = true, StrProperty = true,
+                       TextProperty = true }
+
+-- Property names and types of obj; values only for plain scalars and object references.
+-- Never reads arrays/maps/structs.
+-- Only Object/ClassProperty may be asked GetPropertyClass(): UE4SS doesn't check the type,
+-- so on e.g. a BoolProperty it reads junk as a pointer and crashes natively (pcall can't
+-- catch it). That crashed rcevaldump twice on 2026-11-16 (BP_MyGameState's properties).
+local HAS_PROPERTY_CLASS = { ObjectProperty = true, ClassProperty = true }
+local function ListProps(obj, stopAt, filter)
+    local cls = obj:GetClass()
+    while valid(cls) and not stopAt[cls:GetFName():ToString()] do
+        local cname = cls:GetFName():ToString()
+        cls:ForEachProperty(function(prop)
+            local n, t = prop:GetFName():ToString(), PropType(prop)
+            local pc = ""
+            if HAS_PROPERTY_CLASS[t] then
+                pcall(function() pc = prop:GetPropertyClass():GetFName():ToString() end)
+            end
+            if filter and not (n .. " " .. pc):lower():find(filter, 1, true) then return end
+            local line = "  " .. cname .. "." .. n .. " : " .. t .. (pc ~= "" and ("<" .. pc .. ">") or "")
+            if SCALAR_TYPES[t] or t == "ObjectProperty" then
+                local ok, v = pcall(function() return obj[n] end)
+                line = line .. " = " .. (ok and Scalar(v) or "<unreadable>")
+            end
+            Log(line)
+        end)
+        cls = cls:GetSuperStruct()
+    end
+end
+
+-- One line per OB_Evaluation copy: state plus every L<nn>_ flag.
+local function EvalFlagsLine(e)
+    local flags = {}
+    pcall(function()
+        e:GetClass():ForEachProperty(function(prop)
+            local n = prop:GetFName():ToString()
+            if n:match("^L%d%d_") then
+                local ok, v = pcall(function() return e[n] end)
+                table.insert(flags, n:gsub("_Secret_0", "S"):gsub("_PoliceWork_0", "P") .. "="
+                    .. (not ok and "?" or (v and "1" or "0")))
+            end
+        end)
+    end)
+    local state, stage = "?", "?"
+    pcall(function() state = tostring(e.State) end)
+    pcall(function() stage = tostring(e.CurrentStage) end)
+    return string.format("  %s @%X State=%s Stage=%s  %s", e:GetFName():ToString(), e:GetAddress(),
+        state, stage, table.concat(flags, " "))
+end
+
+local function EvalDump()
+    Log("=== rcevaldump ===")
+    -- 1. The functions the evaluation blueprint calls, wherever they live.
+    for _, fn in ipairs(FindFunctionsNamed(EVAL_FUNCS)) do
+        local ok, sig = pcall(function() return ParamsString(ReflectParams(fn)) end)
+        local flags = 0
+        pcall(function() flags = fn:GetFunctionFlags() end)
+        Log(string.format("  %s%s  flags=0x%X", fn:GetFullName(), ok and sig or "(?)", flags))
+    end
+
+    -- 2. Native objective class API.
+    local objCls = StaticFindObject("/Script/Game.Objective")
+    if valid(objCls) then
+        Log("=== /Script/Game.Objective API ===")
+        DumpClassApi(objCls, { Actor = true, Object = true })
+    else
+        Log("  /Script/Game.Objective not found")
+    end
+
+    -- 3. Live objectives. (First run: 132 = 4 copies of each objective. Why 4?)
+    local live = LiveInstances("Objective")
+    Log("=== " .. #live .. " live Objective(s) ===")
+    for _, o in ipairs(live) do Log("  " .. o:GetFullName()) end
+
+    -- 4. The evaluation objective: all copies side by side, full dump of the first.
+    local evals = LiveInstances("OB_Evaluation_C")
+    Log("=== " .. #evals .. " live OB_Evaluation_C ===")
+    for _, e in ipairs(evals) do Log(EvalFlagsLine(e)) end
+    if evals[1] then DumpObject(evals[1], { Actor = true, Object = true }) end
+
+    -- 5. The objective table's row layout.
+    local dt = StaticFindObject(OBJECTIVE_TABLE)
+    if valid(dt) then
+        pcall(function() Log("  Objective row struct: " .. dt:GetRowStruct():GetFullName()) end)
+        pcall(function()
+            dt:GetRowStruct():ForEachProperty(function(prop)
+                Log("    field " .. PropType(prop) .. " " .. prop:GetFName():ToString())
+            end)
+        end)
+    else
+        Log("  " .. OBJECTIVE_TABLE .. " not loaded")
+    end
+
+    -- 6. ObjectivesManager (owns GetObjectiveState(ObjectiveClass); lives on
+    --    BP_MyGameState_C_0.ObjectivesManager): API and live copies. Scalars and object
+    --    references only (see ListProps).
+    local mgrCls = StaticFindObject("/Script/Game.ObjectivesManager")
+    if valid(mgrCls) then
+        Log("=== /Script/Game.ObjectivesManager API ===")
+        DumpClassApi(mgrCls, { Object = true, ActorComponent = true, Actor = true, Info = true })
+    end
+    local mgrs = LiveInstances("ObjectivesManager")
+    Log("=== " .. #mgrs .. " live ObjectivesManager ===")
+    for _, m in ipairs(mgrs) do
+        Log(string.format("OBJECT %s @%X", m:GetFullName(), m:GetAddress()))
+        ListProps(m, { Object = true, ActorComponent = true, Actor = true, Info = true }, nil)
+    end
+
+    -- 7. Which copy the game itself uses: ObjectivesManager:GetObjective(ObjectiveClass)
+    --    (signature from step 6's dump; read-only getter) on the current GameState's manager.
+    local evalCls = StaticFindObject("/Game/Quests/OB_Evaluation.OB_Evaluation_C")
+    local mgr = nil
+    pcall(function() mgr = UEHelpers.GetWorld().GameState.ObjectivesManager end)
+    if valid(mgr) and valid(evalCls) then
+        local ok, real = pcall(function() return mgr:GetObjective(evalCls) end)
+        if ok and valid(real) then
+            Log("=== GameState.ObjectivesManager:GetObjective(OB_Evaluation_C) ===")
+            Log(EvalFlagsLine(real))
+        else
+            Log("  GetObjective(OB_Evaluation_C) returned nothing")
+        end
+    else
+        Log("  GameState.ObjectivesManager or OB_Evaluation_C class not found")
+    end
+    Notify("Evaluation info written to UE4SS.log")
 end
 
 -- Our pause menu buttons, by object address (the menu rebuilds its buttons on every open,
@@ -1676,8 +2089,56 @@ PAGES.root = function()
         { "Upgrade boards",      function() OpenPage("boards") end },
         { "Skill points",        function() OpenPage("skills") end },
         { "DLC starting weapon", function() OpenPage("dlc") end },
+        { "Secrets & police work", function() OpenPage("secrets") end },
         BackTo(nil),
     }
+end
+
+-- One chapter: heading with the count, then the items (read-only lines, fn = nil). With
+-- withWaypoints, missing items that have a known spot can be clicked to set a waypoint.
+local function ChecklistEntries(t, c, withWaypoints)
+    table.insert(t, { string.format("%s: %d/%d", c.chapter.title, c.found, #c.items), nil })
+    for _, it in ipairs(c.items) do
+        if withWaypoints and it.found == false and it.waypoint then
+            table.insert(t, { ChecklistMark(it.found) .. it.text .. "  - set waypoint",
+                              function() PlaceWaypoint(it.flag, it.text) end })
+        else
+            table.insert(t, { ChecklistMark(it.found) .. it.text, nil })
+        end
+    end
+end
+
+PAGES.secrets = function()
+    local t = {}
+    local list = ReadChecklist()
+    if not list then
+        table.insert(t, { "Available once you're in a level", nil })
+    else
+        local cur = nil
+        for _, c in ipairs(list.chapters) do
+            if c.current then cur = c end
+        end
+        if cur then ChecklistEntries(t, cur, true)
+        else table.insert(t, { "This chapter has no secrets or police work", nil }) end
+        table.insert(t, { "Remove waypoint", function()
+            Notify(RemoveWaypoints() > 0 and "Waypoint removed" or "No waypoint to remove")
+        end })
+    end
+    table.insert(t, { "All chapters", function() OpenPage("secrets_all") end })
+    table.insert(t, BackTo("root"))
+    return t
+end
+
+PAGES.secrets_all = function()
+    local t = {}
+    local list = ReadChecklist()
+    if not list then
+        table.insert(t, { "Available once you're in a level", nil })
+    else
+        for _, c in ipairs(list.chapters) do ChecklistEntries(t, c) end
+    end
+    table.insert(t, BackTo("secrets"))
+    return t
 end
 
 PAGES.weapons = function()
@@ -2276,6 +2737,11 @@ if DEV_TOOLS then
         return true
     end)
 
+    RegisterConsoleCommandHandler("rcevaldump", function()
+        ExecuteInGameThread(EvalDump)
+        return true
+    end)
+
     RegisterConsoleCommandHandler("givechipraw", function(_, Params, Ar)
         if #Params < 2 then Out(Ar, "Usage: givechipraw <Shape> <rotation> [boost] [tier]") return true end
         local shape, rot = Params[1], tonumber(Params[2]) or 0
@@ -2305,6 +2771,25 @@ local uiConnected = false
 local uiBoardsPushed = false
 local uiBoardRetry = 0
 local dlcBackpackRetry = 0
+local uiSecretsRetry = 0
+local uiSecretsLast = nil
+
+-- Checklist for the GUI's Secrets tab, as text: one line per chapter
+-- "C<TAB>title<TAB>found<TAB>total<TAB>current 0|1", then one per item
+-- "I<TAB>found 1|0|?<TAB>kind<TAB>text<TAB>flag<TAB>waypoint 1|0". Empty = not in a level.
+local function ChecklistText()
+    local list = ReadChecklist()
+    if not list then return "" end
+    local lines = {}
+    for _, c in ipairs(list.chapters) do
+        table.insert(lines, table.concat({ "C", c.chapter.title, c.found, #c.items, c.current and 1 or 0 }, "\t"))
+        for _, it in ipairs(c.items) do
+            local f = it.found == nil and "?" or (it.found and "1" or "0")
+            table.insert(lines, table.concat({ "I", f, it.kind, it.text, it.flag, it.waypoint and 1 or 0 }, "\t"))
+        end
+    end
+    return table.concat(lines, "\n")
+end
 
 LoadDlcSetting()
 WatchNewBackpacks()
@@ -2326,6 +2811,17 @@ local function HandleUiRequest(req)
         GiveSkillPoints(tonumber(words[2]) or DEFAULT_SKILL_POINTS)
     elseif kind == "skillclear" then
         ClearSkillPoints()
+    elseif kind == "waypoint" then
+        -- "waypoint <flag>"
+        local text = asset
+        for _, ch in ipairs(EVAL_CHAPTERS) do
+            for _, it in ipairs(ch.items) do
+                if it[1] == asset then text = it[3] end
+            end
+        end
+        PlaceWaypoint(asset, text)
+    elseif kind == "waypointclear" then
+        Notify(RemoveWaypoints() > 0 and "Waypoint removed" or "No waypoint to remove")
     elseif kind == "give" then
         for _, w in ipairs(WEAPONS) do
             if w[2] == asset then GiveWeapon(w) return end
@@ -2356,7 +2852,21 @@ LoopInGameThreadWithDelay(100, function()
         for _, w in ipairs(WEAPONS) do RC_UI_AddWeapon(w[1], w[2]) end
         for _, a in ipairs(AMMO) do RC_UI_AddAmmo(a[1], a[2]) end
         if RC_UI_SetDlcWeapon then RC_UI_SetDlcWeapon(dlcWeapon or "default") end
+        uiSecretsLast = nil
         Log("GUI tab connected.")
+    end
+    -- Secrets tab: refresh about once a second, send only when something changed.
+    -- (RC_UI_SetSecrets is missing with an older main.dll.)
+    if RC_UI_SetSecrets then
+        uiSecretsRetry = uiSecretsRetry - 1
+        if uiSecretsRetry <= 0 then
+            uiSecretsRetry = 10
+            local ok, text = pcall(ChecklistText)
+            if ok and text ~= uiSecretsLast then
+                uiSecretsLast = text
+                RC_UI_SetSecrets(text)
+            end
+        end
     end
     -- Board rows need the DataTable loaded, so wait until a player exists; retry every ~5 s.
     if not uiBoardsPushed and RC_UI_AddBoard then
@@ -2380,5 +2890,5 @@ LoopInGameThreadWithDelay(100, function()
     end
 end)
 
-Log("v" .. MOD_VERSION .. " loaded. F7/F8 select, F9 give. Console: givelist, give, giveammo, givechip, boardlist, giveboard, dlcweapon, giveskill, clearskill."
-    .. (DEV_TOOLS and " Dev tools: F6/rcdump, Ctrl+F6/rcchipmap, rcchipinfo, rcchipdump, givechipraw, rcmenudump, rcmenuwatch." or ""))
+Log("v" .. MOD_VERSION .. " loaded. F7/F8 select, F9 give. Console: givelist, give, giveammo, givechip, boardlist, giveboard, dlcweapon, giveskill, clearskill, secrets."
+    .. (DEV_TOOLS and " Dev tools: F6/rcdump, Ctrl+F6/rcchipmap, rcchipinfo, rcchipdump, givechipraw, rcmenudump, rcmenuwatch, rcevaldump." or ""))
