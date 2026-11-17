@@ -6,6 +6,8 @@ workflow takes each version's notes from its `## [X.Y]` section.
 
 ## [Unreleased]
 
+## [1.2] - 2026-11-16
+
 ### Added
 - Secrets & police work page (pause menu, menu window, console `secrets`): the
   items the end-of-level grade counts, marked found / missing for the current

@@ -42,7 +42,7 @@
 
 local UEHelpers = require("UEHelpers")
 
-local MOD_VERSION = "1.1"
+local MOD_VERSION = "1.2"
 -- Research/debug hotkeys and console commands. Off in releases.
 local DEV_TOOLS = false
 
